@@ -13,7 +13,6 @@ env/
 ENV/
 
 # Large data files
-*.npy
 *.npz
 *.h5
 *.csv

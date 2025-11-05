@@ -61,7 +61,7 @@ def _remove_lower_edge_reflections(points, resolution = 20000, band_mm=25.0, min
     keep_mask = ~reflect_mask
     return points[keep_mask], keep_mask
 
-def _remove_wall_reflections(points, eps=None, standardize=True, resolution=20000, max_samples_for_eps=150000, min_samples=25, knn_k=8, knn_quantile=0.98):
+def _remove_wall_reflections(points, standardize=True, resolution=20000):
     Y = points[:,1].astype(np.float64)
     Z = points[:,2].astype(np.float64)
     YZ = np.column_stack([Y, Z])
@@ -73,37 +73,7 @@ def _remove_wall_reflections(points, eps=None, standardize=True, resolution=2000
     else:
         YZ_std = YZ
     
-    # auto-eps (from subsampled k-NN)
-    if eps is None:
-        idx = np.random.choice(YZ_std.shape[0], min(max_samples_for_eps, YZ_std.shape[0]), replace=False) # subsample for efficiency
-        knn_k
-        nn = NearestNeighbors(n_neighbors=knn_k).fit(YZ_std[idx])
-        dists, _ = nn.kneighbors(YZ_std[idx])
-        kth = dists[:, -1]
-        eps = max(np.quantile(kth, knn_quantile), 1e-6)
-
-    labels = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1).fit_predict(YZ_std)
-
-    # no clusters then keep all
-    if (labels >= 0).sum() == 0:
-        return points, np.ones(points.shape[0], dtype=bool)
-
-    best_lab, best_key = None, None
-    for lab in np.unique(labels[labels >= 0]):
-        idx = (labels == lab)
-        if idx.sum() < max(min_samples, 10):  # discard tiny clusters
-            continue
-        z95 = np.quantile(Z[idx], 0.95)
-        key = (z95, -idx.sum())
-        if best_key is None or key < best_key:
-            best_key, best_lab = key, lab
-
-    if best_lab is None:
-        # fallback to largest
-        labs = [lab for lab in np.unique(labels) if lab >= 0]
-        best_lab = max(labs, key=lambda L: (labels == L).sum())
-
-    keep_mask = (labels == best_lab)
+    keep_mask = np.ones(points.shape[0], dtype=bool)
     reflect_mask = ~keep_mask
 
     # Visualization of the reflection region
