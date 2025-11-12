@@ -123,3 +123,13 @@ def plot_original_point_cloud(length, width, z_data_path, resolution , title, re
     ax.set_ylabel("Y [px]")
     ax.set_zlabel("Z [raw units]")
     maybe_show(fig)
+
+
+def visualise_boundary_line(y_band, z_thresh, z_band):
+    plt.figure(figsize=(7,6))
+    plt.scatter(y_band, z_band, s=1, c='blue', alpha=0.45, label='Band points')
+    order = np.argsort(y_band)
+    plt.plot(y_band[order], z_thresh[order], 'g-', lw=2.2, label='Threshold line')
+    plt.xlabel("Y [mm]"); plt.ylabel("Z [mm]")
+    plt.title("Keep below green line; remove above")
+    plt.legend(); plt.tight_layout(); plt.show()
