@@ -1,5 +1,6 @@
 import os, sys
 import numpy as np
+import matplotlib.lines as mlines
 
 def _in_ipykernel():
     try:
@@ -61,18 +62,28 @@ def maybe_show(fig):
         else:
             print("(Headless SSH) — skipping plot display.")
 
-def visualise_removed_points(all_removed_points, kept_points):
+def visualise_removed_points(points, reflect_mask, resolution, plot_heading):
+    color_mask = np.where(reflect_mask, 'r', 'b')
     fig = plt.figure()
     ax = fig.add_subplot(projection='3d')
-    ax.scatter(kept_points[:,0], kept_points[:,1], kept_points[:,2], c='blue', s=1, label='Kept')
-    ax.scatter(all_removed_points[:,0], all_removed_points[:,1], all_removed_points[:,2], c='red', s=1, label='Removed')
-    ax.set_title("Kept (blue) vs Removed (red) — scaled in mm")
-    ax.set_xlabel("X [mm]") 
+     # Subsample
+    plot_points = points
+    plot_colors = color_mask
+    if points.shape[0] > resolution:
+        idx = np.random.choice(points.shape[0], resolution, replace=False)
+        plot_points = points[idx]
+        plot_colors = color_mask[idx]
+    ax.scatter(plot_points[:,0], plot_points[:,1], plot_points[:,2], c=plot_colors, s=1)    
+    ax.set_xlabel("X [mm]")
     ax.set_ylabel("Y [mm]")
     ax.set_zlabel("Z [mm]")
+    blue_dot = mlines.Line2D([], [], color='blue', marker='o', linestyle='None',markersize=5, label='Valid (Kept) Points')
+    red_dot = mlines.Line2D([], [], color='red', marker='o', linestyle='None',markersize=5, label='Removed Points')
+    ax.legend(handles=[blue_dot, red_dot], loc='upper right', markerscale=3, fontsize=8)
+    ax.set_title(plot_heading, fontsize=9, wrap=True)
     maybe_show(fig)
 
-def plot_original_point_cloud(length, width, z_data_path, resolution , remove_invalid=True):
+def plot_original_point_cloud(length, width, z_data_path, resolution , title, remove_invalid=True):
     z_vector = np.load(z_data_path)
     n = z_vector.size
     if n == length * width:
@@ -107,7 +118,7 @@ def plot_original_point_cloud(length, width, z_data_path, resolution , remove_in
 
     x, y, z = points[:,0], points[:,1], points[:,2]
     ax.scatter(x, y, z, cmap='viridis', c=z, s=1)
-    ax.set_title("Original Point Cloud (Unfiltered)")
+    ax.set_title(f"Original Point Cloud (Unfiltered) from {title}", fontsize=9, wrap=True)
     ax.set_xlabel("X [px]")
     ax.set_ylabel("Y [px]")
     ax.set_zlabel("Z [raw units]")

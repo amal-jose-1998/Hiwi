@@ -1,9 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import open3d as o3d
 from outlier_correction import OutlierRemover
 from scale_correction import Callibrator
-from reflection_remover import remove_reflections, visualise_removed_points
+from reflection_remover import remove_reflections
 from glob import glob
 from pathlib import Path
 from tqdm import tqdm
@@ -23,8 +22,7 @@ remove_invalid = True # If True remove points, that are invalid (like double.nan
 scaling_factor_in_Z = 30 # Scale Z to this value (mm)
 
 def run_my_logic(outlier_remover, length, width, sx, sy, bbox = None, z_data_path = "/home/RUS_CIP/st184634/software_projects/laser_scanners/pc_measurement/z_data.npy"):
-    #utils.plot_original_point_cloud(length, width, z_data_path, resolution)
-    pcd = o3d.geometry.PointCloud()
+    utils.plot_original_point_cloud(length, width, z_data_path, resolution, title = z_data_path)
     z = load_z_2d(z_data_path, width_hint=width, length_hint=length) 
     y, x = np.indices(z.shape) 
     # Prepare XYZ from kept pixels
@@ -48,29 +46,22 @@ def run_my_logic(outlier_remover, length, width, sx, sy, bbox = None, z_data_pat
     points = np.column_stack((X, Y, Z))
     
     original_points = np.column_stack((X_px_all * sx, Y_px_all * sy, ((Z_all - z_min) / den) * scaling_factor_in_Z))
-    visualise_removed_points(original_points, outlier_removed, resolution, plot_heading="red = outliers")
-
-    #z = points[:, -1]
-    #z -= np.min(z) # remove offset
-    #z = (z / np.max(z)) * scaling_factor_in_Z 
-    #points[:, -1] = z
+    utils.visualise_removed_points(original_points, outlier_removed, resolution, plot_heading=f"Outliers removed from {z_data_path}")
 
     #Remove reflection artifacts from the point cloud
-    refined_points, valid_mask = remove_reflections(points, band_mm=30.0)
-    reflection_removed = ~valid_mask # 1D mask of reflection-removed points
+    refined_points = remove_reflections(points, z_data_path, band_mm=30.0)
     
-    reflection_points = points[reflection_removed]
-    outlier_points = np.column_stack((X_px_all[outlier_removed] * sx, Y_px_all[outlier_removed] * sy,((Z_all[outlier_removed] - z_min) / den) * scaling_factor_in_Z))    
-    all_removed_points = np.vstack((outlier_points, reflection_points))
+    if refined_points is None or refined_points.size == 0:
+        raise ValueError(f"No points left after reflection removal for {z_data_path}.")
 
-    # Subsample for visualization
-    if all_removed_points.shape[0] > resolution:
-        idx = np.random.choice(all_removed_points.shape[0], resolution, replace=False)
-        all_removed_points = all_removed_points[idx]
+    save_path = "/home/RUS_CIP/st184634/software_projects/laser_scanners/refined_data/refined_points.npy"
+    np.save(save_path, refined_points)
+    print(f"Refined points saved to: {save_path}")
+
     if refined_points.shape[0] > resolution:
         idx = np.random.choice(refined_points.shape[0], resolution, replace=False)
         refined_points = refined_points[idx]
-    #utils.visualise_removed_points(all_removed_points, refined_points)
+    # Visualize final point cloud
     fig = plt.figure()
     ax = fig.add_subplot(projection='3d')
     ax.scatter(refined_points[:,0], refined_points[:,1], refined_points[:,2], c=refined_points[:,2], cmap='viridis', s=1)
@@ -78,6 +69,7 @@ def run_my_logic(outlier_remover, length, width, sx, sy, bbox = None, z_data_pat
     ax.set_xlabel("X [mm]" if bbox is not None else "X [px]")
     ax.set_ylabel("Y [mm]" if bbox is not None else "Y [px]")
     ax.set_zlabel("Z [mm]")
+    ax.set_title(f"Processed Point Cloud from {z_data_path}", fontsize=9, wrap=True)
     utils.maybe_show(fig)
 
 def quick_get_pairs(main_folder_path: str) -> List[Tuple[str, str]]:
