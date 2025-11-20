@@ -77,6 +77,8 @@ def visualise_removed_points(points, reflect_mask, resolution, plot_heading):
     ax.set_xlabel("X [mm]")
     ax.set_ylabel("Y [mm]")
     ax.set_zlabel("Z [mm]")
+    ax.set_xlim([0,200])
+    ax.set_ylim([0,200])
     blue_dot = mlines.Line2D([], [], color='blue', marker='o', linestyle='None',markersize=5, label='Valid (Kept) Points')
     red_dot = mlines.Line2D([], [], color='red', marker='o', linestyle='None',markersize=5, label='Removed Points')
     ax.legend(handles=[blue_dot, red_dot], loc='upper right', markerscale=3, fontsize=8)

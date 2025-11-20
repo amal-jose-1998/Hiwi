@@ -47,6 +47,28 @@ class OutlierRemover:
         eps = float(np.median(kth) * 1.5) # 1.5 is a heuristic factor for robustness
         return float(np.clip(eps, 2.0, 200.0)) # clamp to reasonable range
 
+    def remove_invalid_z(self, z):
+        """
+        Remove invalid points from z (like global min or NaN).
+
+        Parameters
+        z : ndarray of shape (H, W)
+            2D array of depth values (floats).
+
+        Returns
+        valid_mask : ndarray of shape (H, W), dtype=bool
+            Boolean mask where True marks valid (finite and non-min) pixels.
+        """
+        z = np.asarray(z, dtype=float)
+        valid = np.isfinite(z) # Start with all finite points
+
+        # Treat global min as invalid. Remove all points that are the lowest (= invalid values)
+        zmin = np.nanmin(z)
+        if self.remove_invalid:
+            valid &= (z != zmin) # updates valid by AND-ing it with the new mask.
+
+        return valid
+
     def remove_outliers(self, z):
         """
         Remove outliers using connected components and DBSCAN on centroids.
@@ -64,13 +86,7 @@ class OutlierRemover:
             Boolean mask where True marks pixels belonging to the retained components.
         """
 
-        z = np.asarray(z, dtype=float)
-        valid = np.isfinite(z) # Start with all finite points
-
-        # Treat global min as invalid. Remove all points that are the lowest (= invalid values)
-        zmin = np.nanmin(z)
-        if self.remove_invalid:
-            valid &= (z != zmin) # updates valid by AND-ing it with the new mask.
+        valid = self.remove_invalid_z(z) # initial valid mask
 
         labeled, ncomp = ndi.label(valid) # connected component labeling
         

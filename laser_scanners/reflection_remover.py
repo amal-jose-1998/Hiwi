@@ -1,19 +1,26 @@
 import numpy as np
 import utils
-#from scipy import ndimage as ndi
+from scipy.spatial import cKDTree
+import matplotlib.pyplot as plt
+from outlier_correction import OutlierRemover
 
-def remove_reflections(points, z_data_path, band_mm):
-    valid_mask_1 = _remove_lower_edge_reflections(points, z_data_path, band_mm=band_mm)      
-    valid_mask_2 = _remove_wall_reflections(points[valid_mask_1], z_data_path)      
+
+def remove_reflections(op_flag, points, z_data_path, band_mm, visualise):
+    valid_mask_1 = _remove_lower_edge_reflections(op_flag, points, z_data_path, band_mm=band_mm, visualise=visualise)      
+    #valid_mask_2 = remove_wall_reflections(points[valid_mask_1], z_data_path, visualise=visualise) 
+    valid_mask_2 = _remove_wall_reflections(op_flag, points[valid_mask_1], z_data_path, visualise=visualise)     
     final_mask = np.zeros(len(points), dtype=bool)
     final_mask[valid_mask_1] = valid_mask_2 # combine masks
     return points[final_mask]
 
-def _remove_lower_edge_reflections(points, z_data_path, resolution = 20000, band_mm=25.0, min_points=10):
+
+def _remove_lower_edge_reflections(op_flag, points, z_data_path, resolution = 20000, band_mm=25.0, min_points=10, visualise=True):
     """
     Removes reflection spikes near the lowest Y edge of the point cloud.
 
     parameters
+    op_flag : str
+        Operation flag indicating the type of operation (e.g., "OP_10" or "OP_20").
     points : ndarray of shape (N, 3)
         Input point cloud as (X, Y, Z) coordinates. 
     resolution : int
@@ -33,8 +40,20 @@ def _remove_lower_edge_reflections(points, z_data_path, resolution = 20000, band
     Z = points[:, 2]
 
     y_min = np.min(Y)
-    band_mask = (Y <= y_min + band_mm)
+    y_max = np.max(Y)
+    x_min = np.min(X)
+    x_max = np.max(X)
 
+    band_mask_1 = (Y <= y_min + band_mm)
+    band_mask_2 = (Y >= y_max - band_mm) 
+    band_mask_3 = (X <= x_min + band_mm)
+    band_mask_4 = (X >= x_max - band_mm)
+    band_mask = band_mask_1 | band_mask_2 | band_mask_3 | band_mask_4
+    
+    if op_flag == "OP_10":
+        band_mask = band_mask_1
+        print("band_mask_1 applied for OP_10")
+    
     band = points[band_mask] # points in the band
     keep_mask = np.ones(points.shape[0], dtype=bool)
     if band.shape[0] < min_points:
@@ -53,67 +72,20 @@ def _remove_lower_edge_reflections(points, z_data_path, resolution = 20000, band
     reflect_mask = band_mask & (Z > (z_baseline))
 
     # Visualization of the reflection region
-    utils.visualise_removed_points(points, reflect_mask, resolution, plot_heading=f"Edge reflections removed from {z_data_path}")
+    if visualise:
+        utils.visualise_removed_points(points, reflect_mask, resolution, plot_heading=f"Edge reflections removed from {z_data_path}")
 
     # Keep everything else
     keep_mask = ~reflect_mask
     return keep_mask
 
-#def __remove_wall_reflections(points, z_data_path, band_size=40,  dy=0.001, dz=0.001, min_points=1000, min_pts_per_cell=1, z_min_for_check=10, resolution=20000):
-#    Y, Z = points[:,1], points[:,2]
-#    y_max = np.max(Y)
-#    band_mask = (Y >= y_max - band_size)
-#    band = points[band_mask] # points in the band
-#   
-#    keep_mask = np.ones(points.shape[0], dtype=bool)
-#    if band.shape[0] < min_points:
-#        return keep_mask  # skip if the band is too sparse
-#    # z and y values in the band
-#    z_band = band[:, 2] 
-#    y_band = band[:, 1] 
-#
-#    checkZ = (z_band >= z_min_for_check) # only consider points with sufficient Z
-#
-#    # Determine number of bins in y and z
-#    y0, y1 = float(y_band.min()), float(y_band.max()) # Y range in the band
-#    z0, z1 = float(z_band.min()), float(z_band.max()) # Z range in the band
-#    ny = max(1, int(np.ceil((y1 - y0) / dy))) 
-#    nz = max(1, int(np.ceil((z1 - z0) / dz))) 
-#
-#    occ = np.zeros((nz, ny), dtype=np.uint16) # occupancy grid
-#    # Populate occupancy grid
-#    iy = np.clip(((y_band - y0) / dy).astype(int), 0, ny - 1) # y bin indices
-#    iz = np.clip(((z_band - z0) / dz).astype(int), 0, nz - 1) # z bin indices
-#    np.add.at(occ, (iz[checkZ], iy[checkZ]), 1) # increment occupancy
-#
-#    binary = occ >= min_pts_per_cell # discard tiny noise cells
-#    
-#    # find largest connected component
-#    labels, nlab = ndi.label(binary)
-#    if nlab <= 1:  # nothing or only one component found
-#        return keep_mask
-#
-#    sizes = np.bincount(labels.ravel()) # component sizes
-#    sizes[0] = 0  # background label
-#    keep_lab = sizes.argmax() # label of the largest component
-#    main_blob = (labels == keep_lab) # mask of the largest component
-#
-#    in_blob = main_blob[iz, iy]  # True if the (Yb,Zb) cell is in the largest component
-#    in_blob = (~checkZ) | in_blob # always keep low-Z points
-#    keep_mask[np.where(band_mask)[0]] = in_blob
-#        
-#    reflect_mask = ~keep_mask
-#    # Visualization of the reflection region
-#    utils.visualise_removed_points(points, reflect_mask, resolution, plot_heading=f"Wall reflections removed from {z_data_path}")
-#
-#    return keep_mask
-
-
-def _remove_wall_reflections(points, z_data_path, band_size=48, min_points=1000, z_thresh_min=2, z_thresh_max=30, resolution=20000, plot=True):
+def _remove_wall_reflections(op_flag, points, z_data_path, band_size=48, min_points=1000, z_thresh_min=3.5, z_thresh_max=30, resolution=20000, plot=True, visualise=True):
     """
-    Removes reflection artifacts from vertical wall surfaces in the point cloud.
+    Removes reflection artifacts from vertical wall surfaces in the point cloud, using a dynamic threshold line in Z vs Y defined by a preset slope and offset.
 
     parameters
+    op_flag : str
+        Operation flag indicating the type of operation (e.g., "OP_10" or "OP_20").
     points : ndarray of shape (N, 3)
         Input point cloud as (X, Y, Z) coordinates.
     z_data_path : str
@@ -135,8 +107,12 @@ def _remove_wall_reflections(points, z_data_path, band_size=48, min_points=1000,
     keep_mask : ndarray of shape (N,), dtype=bool
         Boolean mask where True marks points that were kept.
     """
-    Y0_offset = 30 # offset for Y0 calculation; ie. y coordinate of the start of the slope line
-    slope = -1.18 # slope of the threshold line in Z vs Y
+    if op_flag == "OP_10":
+        Y0_offset = 24# offset for Y0 calculation; ie. y coordinate of the start of the slope line
+        slope = -1.44 # slope of the threshold line in Z vs Y
+    else: # OP_20
+        Y0_offset = 14# offset for Y0 calculation; ie. y coordinate of the start of the slope line
+        slope = -2.0 # slope of the threshold line in Z vs Y
     Y, Z = points[:,1], points[:,2]    
     y_max = float(np.max(Y))
     band_mask = (Y >= y_max - band_size)
@@ -161,15 +137,159 @@ def _remove_wall_reflections(points, z_data_path, band_size=48, min_points=1000,
     keep_in_band = (z_band <= z_thresh)
     keep_mask[band_idx] = keep_in_band
 
-    # show what was removed 
-    try:
-        reflect_mask = ~keep_mask
-        utils.visualise_removed_points(points, reflect_mask, resolution, plot_heading=f"Removed > threshold from {z_data_path}")
-    except Exception:
-        pass
+    if visualise:
+        # show what was removed 
+        try:
+            reflect_mask = ~keep_mask
+            utils.visualise_removed_points(points, reflect_mask, resolution, plot_heading=f"Removed > threshold from {z_data_path}")
+        except Exception:
+            pass
 
-    # debug plot
-    if plot:
-        utils.visualise_boundary_line(y_band, z_thresh, z_band)
+        # debug plot
+        if plot:
+            utils.visualise_boundary_line(y_band, z_thresh, z_band)
         
     return keep_mask
+
+
+def knn_cache(points, k=20, batch=None):
+    """
+    Build a cKDTree once, return kNN distances/indices for every point.
+    If 'batch' is set (int), queries in chunks to reduce peak memory.
+    """
+    tree = cKDTree(points)
+    N = len(points)
+    dists = np.empty((N, k), dtype=np.float32)
+    idx   = np.empty((N, k), dtype=np.int32)
+
+    if batch is None:
+        d, i = tree.query(points, k=k)
+        dists[:] = d
+        idx[:]   = i
+    else:
+        for s in range(0, N, batch):
+            e = min(N, s+batch)
+            d, i = tree.query(points[s:e], k=k)
+            dists[s:e] = d
+            idx[s:e]   = i
+    return dists, idx
+
+def density_score_from_knn(dists):
+    # exclude self at col 0
+    mean_knn = dists[:, 1:].mean(axis=1)
+    return 1.0 / (mean_knn + 1e-9)  # higher = denser (better)
+
+def spacing_cv(dists):
+    dd = dists[:, 1:]
+    mu = dd.mean(axis=1) + 1e-9
+    sd = dd.std(axis=1)
+    return sd / mu  # higher = irregular (worse)
+
+def kth_distance_stability(dists):
+    kth = dists[:, -1]
+    med = np.median(kth)
+    mad = 1.4826 * np.median(np.abs(kth - med)) + 1e-9
+    z = np.abs((kth - med) / mad)
+    return -z  # higher = more typical neighborhood (better)
+
+def surface_variation(points, idx):
+    """
+    λ3 / (λ1+λ2+λ3) using local covariance on kNN.
+    Higher = scattered (worse). Uses a simple Python loop; numba can JIT it.
+    """
+    N = len(points)
+    sv = np.zeros(N, dtype=np.float32)
+    for i in range(N):
+        neigh = points[idx[i]]
+        C = np.cov(neigh.T)
+        w = np.linalg.eigvalsh(C)  # ascending: λ1<=λ2<=λ3
+        s = w.sum()
+        if s > 0:
+            sv[i] = w[0] / s  # smallest / total
+    return sv
+
+def robust_unit(score, higher_is_better=True):
+    med = np.median(score)
+    mad = 1.4826 * np.median(np.abs(score - med)) + 1e-9
+    z = (score - med) / mad
+    # squash to [0,1] for stability
+    s = 1.0 / (1.0 + np.exp(-np.clip(z, -6, 6)))
+    return s if higher_is_better else 1 - s
+
+def combine_scores(scores, weights=None):
+    if weights is None:
+        weights = [1.0] * len(scores)
+    S = np.zeros_like(scores[0], dtype=np.float32)
+    wsum = float(np.sum(weights)) + 1e-9
+    for w, sc in zip(weights, scores):
+        S += w * sc
+    return S / wsum
+
+def sor_mask(points, k=18, zmax=3.0):
+    """
+    Statistical Outlier Removal on mean k-NN distance (robust z-score).
+    Keep points whose mean neighbor distance is within zmax MADs.
+    """
+    tree = cKDTree(points.astype(np.float32, copy=False))
+    dists, _ = tree.query(points, k=k)  # dists[:,0] == 0
+    mu = dists[:, 1:].mean(axis=1)
+
+    med = np.median(mu)
+    mad = 1.4826 * np.median(np.abs(mu - med)) + 1e-9
+    z = (mu - med) / mad
+    return z <= zmax
+
+def remove_wall_reflections(points, z_data_path, k_neighbors=20, drop_frac=0.05, weights=(1.0, 1.0, 0.7, 0.5), planar_q=0.95, sor_k=18, sor_zmax=3.2, batch_knn=None, visualise=True):
+    """
+    Returns keep_mask.
+    weights map to: [density, (1-surface_variation), (1-spacing_cv), kth_stability]
+    """
+    # ensure float32
+    pts = np.asarray(points, dtype=np.float32)
+    N   = len(pts)
+
+    # one kNN for all
+    dists, idx = knn_cache(pts, k=k_neighbors, batch=batch_knn)
+
+    # raw scores
+    dens = density_score_from_knn(dists)      # higher better
+    svar = surface_variation(pts, idx)        # higher worse
+    cv   = spacing_cv(dists)                  # higher worse
+    kstab= kth_distance_stability(dists)      # higher better
+
+    # normalize with correct polarity
+    s1 = robust_unit(dens, higher_is_better=True)
+    s2 = robust_unit(svar, higher_is_better=False)
+    s3 = robust_unit(cv,   higher_is_better=False)
+    s4 = robust_unit(kstab,higher_is_better=True)
+
+    combo = combine_scores([s1, s2, s3, s4], weights=weights)
+    thr = np.quantile(combo, drop_frac)
+    keep = combo >= thr
+
+    # ---- Planarity safeguard: preserve clearly planar patches (sidewalls)
+    # lower svar = more planar; keep the lowest 'planar_q' quantile
+    svar_thr    = np.quantile(svar, planar_q)
+    planar_keep = (svar <= svar_thr)
+
+    # ---- SOR only on risky subset: kernel-kept & NOT planar
+    cand = keep & (~planar_keep)
+    sor_keep_sub = np.zeros(cand.sum(), dtype=bool)
+    if cand.any():
+        sor_keep_sub = sor_mask(pts[cand], k=sor_k, zmax=sor_zmax)
+
+    # ---- assemble final mask
+    final_mask = np.zeros(N, dtype=bool)
+    final_mask[planar_keep] = True          # keep all planar patches
+    final_mask[cand]        = sor_keep_sub  # keep non-planar only if SOR says so
+    # (points not in keep_kernel remain False)
+
+    # ---- visualize ALL wall-stage removals (kernel rejects + SOR rejects)
+    removed_mask = ~final_mask
+
+    if visualise:
+        try:
+            utils.visualise_removed_points(points, removed_mask, resolution=20000, plot_heading=f"Wall Reflections removed from {z_data_path}")
+        except Exception:
+            pass
+    return final_mask
