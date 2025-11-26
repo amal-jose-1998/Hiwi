@@ -8,7 +8,8 @@ from outlier_correction import OutlierRemover
 def remove_reflections(op_flag, points, z_data_path, band_mm, visualise):
     valid_mask_1 = _remove_lower_edge_reflections(op_flag, points, z_data_path, band_mm=band_mm, visualise=visualise)      
     #valid_mask_2 = remove_wall_reflections(points[valid_mask_1], z_data_path, visualise=visualise) 
-    valid_mask_2 = _remove_wall_reflections(op_flag, points[valid_mask_1], z_data_path, visualise=visualise)     
+    #valid_mask_2 = _remove_wall_reflections(op_flag, points[valid_mask_1], z_data_path, visualise=visualise)     
+    valid_mask_2 = __remove_wall_reflections(op_flag, points[valid_mask_1], z_data_path, visualise=visualise) 
     final_mask = np.zeros(len(points), dtype=bool)
     final_mask[valid_mask_1] = valid_mask_2 # combine masks
     return points[final_mask]
@@ -293,3 +294,127 @@ def remove_wall_reflections(points, z_data_path, k_neighbors=20, drop_frac=0.05,
         except Exception:
             pass
     return final_mask
+
+def __remove_wall_reflections(
+    op_flag,
+    points,
+    z_data_path,
+    band_size_use=48,
+    min_points=1000,
+    dy_mm=5.0,
+    min_pts_per_bin=400,
+    k_sigma=1.6,
+    z_margin=0.5,
+    z_thresh_min=3.5,
+    z_thresh_max=30.0,
+    resolution=20000,
+    plot=True,
+    visualise=True,
+):
+    """
+    Remove wall-reflection spikes using a *local* Z threshold per Y-slice
+    instead of a single global line.
+
+    Steps:
+    - Take a Y-band near y_max (size = band_size).
+    - Discretise that band into bins of thickness dy_mm.
+    - In each bin:
+        * Compute median Z and robust sigma (from MAD).
+        * Threshold = median + k_sigma * sigma + z_margin.
+    - Clip thresholds to [z_thresh_min, z_thresh_max].
+    - Points in the band above their local threshold are removed.
+    """
+
+    pts = np.asarray(points)
+    Y = pts[:, 1]
+    Z = pts[:, 2]
+
+    # you can still tweak band_size per op if you want
+    if op_flag == "OP_10":
+        k_sigma=1.9
+        dy_mm=4.5
+    else:
+        k_sigma=1.6
+        dy_mm=5.0
+
+    y_max = float(Y.max())
+    band_mask = (Y >= y_max - band_size_use)
+    band_idx = np.where(band_mask)[0]
+    band = pts[band_mask]
+
+    keep_mask = np.ones(len(pts), dtype=bool)
+
+    if band.shape[0] < min_points:
+        # Too sparse: don't try anything fancy
+        return keep_mask
+
+    y_band = band[:, 1]
+    z_band = band[:, 2]
+
+    # ---- build local thresholds per Y-bin ----
+    y_min_band = float(y_band.min())
+    y_max_band = float(y_band.max())
+
+    if not np.isfinite(y_min_band) or not np.isfinite(y_max_band) or y_max_band <= y_min_band:
+        return keep_mask
+
+    # number of bins from band width / dy_mm (clamped for sanity)
+    n_bins = max(4, int(np.round((y_max_band - y_min_band) / dy_mm)))
+    edges = np.linspace(y_min_band, y_max_band, n_bins + 1)
+
+    # one threshold per point in the band (initially "unset" = NaN)
+    z_thresh_per_point = np.full_like(z_band, np.nan, dtype=float)
+
+    for i in range(n_bins):
+        sel = (y_band >= edges[i]) & (y_band < edges[i + 1])
+        n_sel = int(np.count_nonzero(sel))
+        if n_sel < min_pts_per_bin:
+            continue  # not enough data in this slice
+
+        z_slice = z_band[sel]
+
+        z_med = np.median(z_slice)
+        mad = np.median(np.abs(z_slice - z_med))
+        if mad > 0:
+            sigma = 1.4826 * mad
+        else:
+            sigma = np.std(z_slice)
+
+        # local threshold for this Y range
+        z_thr = z_med + k_sigma * sigma + z_margin
+        z_thr = float(np.clip(z_thr, z_thresh_min, z_thresh_max))
+
+        z_thresh_per_point[sel] = z_thr
+
+    # points with a defined threshold: keep if below, remove if above
+    has_thr = np.isfinite(z_thresh_per_point)
+    keep_in_band = np.ones_like(z_band, dtype=bool)
+    keep_in_band[has_thr] = (z_band[has_thr] <= z_thresh_per_point[has_thr])
+
+    # write back into global mask
+    keep_mask[band_idx] = keep_in_band
+
+    if visualise:
+        # show what was removed
+        try:
+            removed_mask = ~keep_mask
+            utils.visualise_removed_points(
+                points,
+                removed_mask,
+                resolution,
+                plot_heading=f"Wall reflections removed (local Y-slices) from {z_data_path}",
+            )
+        except Exception:
+            pass
+
+        # optional Y–Z debug plot of boundary curve
+        if plot:
+            try:
+                # only plot where threshold exists
+                y_plot = y_band[has_thr]
+                z_thr_plot = z_thresh_per_point[has_thr]
+                utils.visualise_boundary_line(y_plot, z_thr_plot, z_band)
+            except Exception:
+                pass
+
+    return keep_mask

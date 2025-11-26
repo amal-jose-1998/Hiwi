@@ -2,6 +2,9 @@ import numpy as np
 from sklearn.cluster import DBSCAN
 from sklearn.neighbors import NearestNeighbors
 from scipy import ndimage as ndi
+import open3d as o3d
+import utils
+from scipy.spatial import cKDTree
 
 class OutlierRemover:
     """
@@ -131,3 +134,103 @@ class OutlierRemover:
         keep_mask = np.isin(labeled, kept_component_labels) # final mask of pixels to keep
         return keep_mask
 
+    def gradient_z_filter(self, z, threshold=8.0):
+        """
+        Remove pixels where Z changes too abruptly.
+        Returns a boolean mask: True = keep, False = remove.
+
+        Parameters
+        z : 2D numpy array
+            Depth map (length * width)
+        threshold : float
+            Gradient magnitude threshold. 
+            Typical values:
+                5-8  : mild removal
+                10-15: keep more edges
+                20+  : only remove extreme reflections
+        """
+        # Compute gradients along X and Y directions
+        gx, gy = np.gradient(z)
+        # Gradient magnitude
+        mag = np.sqrt(gx**2 + gy**2)
+        # Keep pixels with small/smooth gradients
+        mask = mag < threshold
+        return mask
+    
+    def o3d_statistical_cleanup(self, points, z_data_path=None, visualise=True, resolution=20000, nb_neighbors=20, std_ratio=3 ):
+        """
+        Apply Open3D statistical outlier removal on a point cloud.
+
+        points       : (N, 3) numpy array
+        z_data_path  : used only for plot title / debugging
+        nb_neighbors : number of neighbors to analyze for each point
+        std_ratio    : standard deviation ratio threshold
+        """
+        # Build Open3D point cloud
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points)
+        # Statistical outlier removal
+        clean_pcd, ind = pcd.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
+        clean_points = np.asarray(clean_pcd.points)
+
+        if visualise:
+            keep_mask = np.zeros(len(points), dtype=bool)
+            keep_mask[ind] = True
+            remove_mask = ~keep_mask
+            title = (
+                f"Statistical outliers removed from {z_data_path}"
+                if z_data_path is not None
+                else "Statistical outliers removed"
+            )
+            utils.visualise_removed_points(points, remove_mask, resolution, plot_heading=title)
+
+        return clean_points  
+    
+    def local_planarity_filter(self, points, z_min=0.0, z_max=10, k=15, curvature_threshold=0.015, visualise=True, resolution=20000, title="Local planarity filter"):
+        """
+        Removes points whose local neighborhood is not planar.
+        Uses PCA on each local patch and removes points with high curvature.
+        
+        curvature_threshold:
+            Lower → more aggressive removal.
+            Typical values: 0.01-0.04
+        """
+
+        pts = np.asarray(points)
+
+        # restrict to leg band
+        band_mask = (pts[:, 2] >= z_min) & (pts[:, 2] <= z_max)
+        if not np.any(band_mask):
+            return pts
+
+        band_points = pts[band_mask]
+        other_points = pts[~band_mask]
+
+        M = len(band_points)
+        if M <= k + 1:
+            return pts  # too few to do anything 
+    
+        tree = cKDTree(band_points)
+        keep_band = np.ones(M, dtype=bool)
+
+        for i in range(M):
+            _, nbr_idx = tree.query(band_points[i], k=k+1)
+            nbrs = band_points[nbr_idx]
+
+            C = np.cov(nbrs.T)
+            eigvals = np.linalg.eigvalsh(C)
+            curvature = eigvals[0] / (eigvals.sum() + 1e-9)
+
+            if curvature > curvature_threshold:
+                keep_band[i] = False
+
+        band_filtered = band_points[keep_band]
+        if visualise:
+            removed_indices = np.nonzero(~keep_band)[0]
+            global_remove_mask = np.zeros(len(pts), dtype=bool)
+            # map back to actual indices in input `points`
+            band_global_indices = np.nonzero(band_mask)[0]
+            global_remove_mask[ band_global_indices[removed_indices] ] = True
+            utils.visualise_removed_points(pts, global_remove_mask, resolution, plot_heading=title, )
+
+        return np.vstack([other_points, band_filtered])
