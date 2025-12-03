@@ -26,8 +26,6 @@ def visualize_band_boundary(points, y_min, band_mm, resolution=20000, title="Ban
     """
     Shows a horizontal boundary line at Y = y_min + band_mm on the point cloud.
     """
-    import matplotlib.pyplot as plt
-
     pts = np.asarray(points)
     X = pts[:, 0]
     Y = pts[:, 1]
@@ -119,7 +117,8 @@ def run_my_logic(op_tag, outlier_remover, length, width, sx, sy, bbox = None, z_
     X_px_all = x.ravel()
     Y_px_all = y.ravel()
     Z_all = z.ravel()
-    original_points = apply_scaling(X_px_all, Y_px_all, Z_all, sx, sy, scaling_factor_in_Z) #scaled original points before outlier removal
+    original_points = None
+    
     # Remove outliers
     outlier_removed = None
     if op_tag == "OP_10":
@@ -128,6 +127,7 @@ def run_my_logic(op_tag, outlier_remover, length, width, sx, sy, bbox = None, z_
         X_px, Y_px, Z = x[mask], y[mask], z[mask]
         points = apply_scaling(X_px, Y_px, Z, sx, sy, scaling_factor_in_Z) # Apply scaling
         if visualise:
+            original_points = apply_scaling(X_px_all, Y_px_all, Z_all, sx, sy, scaling_factor_in_Z) #scaled original points before outlier removal
             utils.visualise_removed_points(original_points, outlier_removed, resolution, plot_heading=f"Outliers removed from {z_data_path}")
         band_mm = _estimate_lower_edge_band_mm(points)
         band_mm-=2.5
@@ -136,6 +136,7 @@ def run_my_logic(op_tag, outlier_remover, length, width, sx, sy, bbox = None, z_
         valid_mask = outlier_remover.remove_invalid_z(z) # mask for real measurement with outliers removed
         outlier_removed = ~valid_mask.ravel()
         if visualise:
+            original_points = apply_scaling(X_px_all, Y_px_all, Z_all, sx, sy, scaling_factor_in_Z) #scaled original points before outlier removal
             utils.visualise_removed_points(original_points, outlier_removed, resolution, plot_heading=f"Outliers removed from {z_data_path}")
         valid_gradient_mask = outlier_remover.gradient_z_filter(z) # removes side walls
         valid_core_mask = valid_mask & valid_gradient_mask        # point cloud without sidewalls used for O3D cleanup
