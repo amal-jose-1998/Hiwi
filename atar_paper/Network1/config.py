@@ -6,7 +6,7 @@ Central configuration for:
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Literal
 
 @dataclass(frozen=True)
 class SDFGenerationConfig:
@@ -47,6 +47,9 @@ class MetadataConfig:
         "geom_p3",
     )
 
+    seed: int = 0
+    test_frac: int = 0.2
+
 
 @dataclass(frozen=True)
 class Network1Config:
@@ -65,10 +68,12 @@ class Network1Config:
     # Data
     sdf_dir: str = "/home/RUS_CIP/st184634/software_projects/atar_paper/tool_sdf_samples"
     stats_path: str = "/home/RUS_CIP/st184634/software_projects/atar_paper/network1_stats.npz"
+    geom_table_path: str = "/home/RUS_CIP/st184634/software_projects/atar_paper/prepared_metadata/geom_table.parquet"
+
+    # Sampling/batching
     batch_size: int = 2048
     num_workers: int = 0
     shuffle: bool = True
-
     use_balanced_batches: bool = True
     samples_per_geom_in_batch: int = 256
 
@@ -76,17 +81,33 @@ class Network1Config:
     latent_dim: int = 128
     hidden_dim: int = 256
     depth: int = 4
+    latent_init_std: float = 0.012
+    activation: Literal["relu", "softplus"] = "relu"
+    truncation_delta: float = 0.05
+    use_skip: bool = True
+    skip_layer: int | None = None
 
     # Optim
-    lr: float = 1e-3
+    lr: float = 1e-4
     weight_decay: float = 0.0
     latent_l2_weight: float = 1e-4
 
+     # LR schedule 
+    lr_step_size_epochs: int = 50
+    lr_gamma: float = 0.5
+    lr_min: float = 5e-6
+
     # Training
-    epochs: int = 50
+    epochs: int = 500
     seed: int = 0
     device: str = "cuda"
 
     # Checkpoints
     ckpt_dir: str = "./checkpoints_network1"
     save_every: int = 5
+
+    val_frac: float = 0.1
+    
+    
+    
+    

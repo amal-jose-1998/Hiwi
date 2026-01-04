@@ -51,7 +51,6 @@ def _read_geometry_parameters(h5_path):
         geom = f.attrs["Geometry_Parameters"]
     return np.asarray(geom)
 
-
 def main():
     """
     Create meta.parquet and geom_table.parquet.
@@ -111,6 +110,18 @@ def main():
     )
 
     geom_table["geometry_id"] = np.arange(len(geom_table), dtype=np.int64)
+
+    geom_table["split"] = "train"
+    test_gid = int(geom_table["geometry_id"].max())  # "last one"
+    geom_table.loc[geom_table["geometry_id"] == test_gid, "split"] = "test"
+
+    print(f"\n[metadata_preparation] Using geometry_id={test_gid} as TEST, all others TRAIN.")
+
+    print("\n[metadata_preparation] Split counts:")
+    print(geom_table["split"].value_counts())
+
+    print("\n[metadata_preparation] Split by topology (GEO_R,GEO_V,GEO_X):")
+    print(geom_table.groupby(["GEO_R","GEO_V","GEO_X","split"]).size().unstack(fill_value=0))
 
     print("\n[metadata_preparation] Geometry table:")
     print(geom_table)

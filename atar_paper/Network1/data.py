@@ -2,8 +2,10 @@
 
 from pathlib import Path
 from typing import List
+import copy
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 
@@ -24,18 +26,21 @@ class ToolSDFDataset(Dataset):
             Ground-truth signed distance at xyz.
     """
 
-    def __init__(self, sdf_dir, transform=None):
+    def __init__(self, sdf_dir, transform=None, allowed_geom_ids=None, gid_remap=None):
         self.sdf_dir = Path(sdf_dir)
         self.sdf_files = sorted(self.sdf_dir.glob("tool_geom*_sdf.npz"))
         if not self.sdf_files:
             raise RuntimeError(f"No SDF npz files found in {self.sdf_dir}")
 
         self.transform = transform
+        self.gid_remap = gid_remap
 
         # Load and stack all samples
         xyz_all = []
         sdf_all = []
         geom_id_all = []
+
+        allowed = None if allowed_geom_ids is None else set(map(int, allowed_geom_ids))
 
         for path in self.sdf_files:
             data = np.load(path)
@@ -44,16 +49,27 @@ class ToolSDFDataset(Dataset):
             sdf = data["sdf"].astype(np.float32)[:, None]       # (N,1)
             geom_id = int(data["geom_id"])
 
+            if allowed is not None and geom_id not in allowed:
+                continue
+
+            if self.gid_remap is not None:
+                geom_id = int(self.gid_remap[geom_id])
+
             N = points.shape[0]
             geom_ids = np.full((N,), geom_id, dtype=np.int64)   # (N,)
 
             xyz_all.append(points)
             sdf_all.append(sdf)
             geom_id_all.append(geom_ids)
+
+        if not xyz_all:
+            raise RuntimeError("No SDF samples matched allowed_geom_ids.")    
+        
         # M = total number of SDF points across all geometries => training samples
         self.xyz = np.vstack(xyz_all)                    # (M,3)
         self.sdf = np.vstack(sdf_all)                    # (M,1)
         self.geom_id = np.concatenate(geom_id_all)       # (M,)
+        
 
         self.num_geometries = int(self.geom_id.max()) + 1
 
@@ -156,6 +172,49 @@ class BalancedGeomBatchSampler(Sampler[List[int]]):
             rng.shuffle(batch) # Shuffle combined batch (mix geometries)
             yield batch
 
+def split_indices_by_geometry(geom_id, val_frac, seed):
+    """
+    Stratified (by geometry) point-level split.
+    Returns train_idx, val_idx arrays of indices into the dataset arrays.
+    """
+    if not (0.0 < val_frac < 1.0):
+        raise ValueError("val_frac must be in (0,1)")
+
+    rng = np.random.default_rng(int(seed))
+    train_parts = []
+    val_parts = []
+
+    for gid in np.unique(geom_id):
+        idx = np.where(geom_id == gid)[0]
+        rng.shuffle(idx)
+
+        n = len(idx)
+        n_val = int(np.round(val_frac * n))
+        # keep at least 1 point in each split (if possible)
+        n_val = max(1, min(n_val, n - 1))
+
+        val_parts.append(idx[:n_val])
+        train_parts.append(idx[n_val:])
+
+    train_idx = np.concatenate(train_parts).astype(np.int64)
+    val_idx = np.concatenate(val_parts).astype(np.int64)
+
+    rng.shuffle(train_idx)
+    rng.shuffle(val_idx)
+    return train_idx, val_idx
+
+
+def subset_toolsdf_dataset(ds, idx):
+    """
+    Create a lightweight subset of ToolSDFDataset that preserves ds.geom_id, ds.xyz, ds.sdf arrays
+    """
+    idx = np.asarray(idx, dtype=np.int64)
+    out = copy.copy(ds)
+    out.xyz = ds.xyz[idx]
+    out.sdf = ds.sdf[idx]
+    out.geom_id = ds.geom_id[idx]
+    out.num_geometries = int(out.geom_id.max()) + 1  # still safe
+    return out
 
 def fit_normalisation_stats(dataset):
     """
@@ -202,17 +261,26 @@ def build_sdf_dataloader(cfg):
     """
     Build a DataLoader using Network1Config.
 
-    Returns
-    loader : DataLoader
-        Yields (geom_id, xyz, sdf).
-    num_geometries : int
-        K inferred from the dataset.
+     Returns:
+      train_loader, val_loader, test_loader, n_train_geoms, n_test_geoms
+    Notes:
+      - train/val are point-level splits within TRAIN geometries (for early stopping).
+      - test_loader (held-out geometries) is NOT meant for forward-pass validation.
+        Use latent-optimisation evaluation script for test.
     """
-    raw_ds = ToolSDFDataset(sdf_dir=cfg.sdf_dir, transform=None)
+    geom_table = pd.read_parquet(cfg.geom_table_path)
+
+    train_gids = geom_table.loc[geom_table["split"]=="train", "geometry_id"].to_list()
+    test_gids  = geom_table.loc[geom_table["split"]=="test",  "geometry_id"].to_list()
+
+    train_gid_to_local = {int(gid): i for i, gid in enumerate(train_gids)}
+
+    raw_train = ToolSDFDataset(cfg.sdf_dir, transform=None, allowed_geom_ids=train_gids, gid_remap=train_gid_to_local)
+
     # Compute stats once and cache them, or load if already computed.
     stats_file = Path(cfg.stats_path)
     if not stats_file.is_file():
-        stats = fit_normalisation_stats(raw_ds)
+        stats = fit_normalisation_stats(raw_train)
         save_normalisation_stats(stats, cfg.stats_path)
     else:
         stats = load_normalisation_stats(cfg.stats_path)
@@ -222,21 +290,31 @@ def build_sdf_dataloader(cfg):
         xyz_std=stats["xyz_std"],
         sdf_scale=float(stats["sdf_scale"]),
     )
+    # create dataset with transform applied
 
-    ds = ToolSDFDataset(sdf_dir=cfg.sdf_dir, transform=transform) # create dataset with transform applied
+    # ---------- transformed full train dataset ----------
+    train_full = ToolSDFDataset( cfg.sdf_dir, transform=transform, allowed_geom_ids=train_gids, gid_remap=train_gid_to_local)
+    # ---------- point-level val split within train ----------
+    val_frac = float(getattr(cfg, "val_frac", 0.1))
+    train_idx, val_idx = split_indices_by_geometry(train_full.geom_id, val_frac=val_frac, seed=int(cfg.seed))
+    train_ds = subset_toolsdf_dataset(train_full, train_idx)
+    val_ds   = subset_toolsdf_dataset(train_full, val_idx)
 
+    # ---------- test dataset ----------
+    test_ds = ToolSDFDataset(cfg.sdf_dir, transform=transform, allowed_geom_ids=test_gids)
+
+    # loaders
     if cfg.use_balanced_batches:
-        sampler = BalancedGeomBatchSampler(ds, samples_per_geom=cfg.samples_per_geom_in_batch, seed=cfg.seed)
-        loader = DataLoader(ds, batch_sampler=sampler, num_workers=cfg.num_workers, pin_memory=True)
+        sampler = BalancedGeomBatchSampler(train_ds, samples_per_geom=cfg.samples_per_geom_in_batch, seed=cfg.seed)
+        train_loader = DataLoader(train_ds, batch_sampler=sampler, num_workers=cfg.num_workers, pin_memory=True)
     else:
-        loader = DataLoader(
-            ds,
-            batch_size=cfg.batch_size,
-            shuffle=cfg.shuffle,
-            num_workers=cfg.num_workers,
-            pin_memory=True,
-        )
+        train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True,
+                                  num_workers=cfg.num_workers, pin_memory=True)
 
-    return loader, raw_ds.num_geometries
+    val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False,
+                            num_workers=cfg.num_workers, pin_memory=True)
 
+    test_loader = DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=False,
+                             num_workers=cfg.num_workers, pin_memory=True)
 
+    return train_loader, val_loader, test_loader, len(train_gids), len(test_gids)
