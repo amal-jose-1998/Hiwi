@@ -2,21 +2,22 @@
 Proper evaluation for held-out geometries in an auto-decoder SDF setup.
 
 Protocol:
-- Load trained decoder weights (MLP) from a checkpoint.
+- Load trained decoder weights from a Lightning checkpoint (.ckpt) or a raw state_dict/.pt.
 - For each TEST geometry:
     * load its SDF samples (points, sdf) from tool_geom{gid}_sdf.npz
     * apply the same normalization (stats from training)
     * freeze decoder
-    * optimize a fresh latent vector z_g to fit that geometry (L1 + lambda||z||^2)
-    * report eval loss on held-out points for that geometry
+    * optimize a fresh latent vector z_g to fit that geometry (clamped L1 + lambda||z||^2)
+    * report fit/eval loss on held-out points for that geometry
 
-This is the correct "test" for geometry-level split.
+This is the correct "test" for geometry-level split in an auto-decoder.
 """
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import torch
@@ -26,74 +27,70 @@ from .model import Network1SDF
 from .data import load_normalisation_stats, SDFTransform
 
 
-def load_decoder_only(model: Network1SDF, ckpt_path: Path) -> None:
+def load_decoder_only(model, ckpt_path):
     """
-    Load only the decoder (MLP) weights from either:
-      - Lightning .ckpt  (expects key: "state_dict", with "model.mlp.*")
-      - plain torch .pt  (expects key: "model_state", with "mlp.*" or "model.mlp.*")
+    Load only the decoder weights (fcs + out) from either:
+      - Lightning .ckpt  (expects key: "state_dict", with "model.fcs.*" and "model.out.*")
+      - plain torch .pt  (expects key: "model_state" or raw dict)
+    We intentionally ignore latent embedding weights at eval (fresh z is optimized).
     """
     ckpt = torch.load(ckpt_path, map_location="cpu")
 
-    # 1) pick the right state dict field
+    # Pick the right state dict field
     if isinstance(ckpt, dict) and "state_dict" in ckpt:
         state = ckpt["state_dict"]          # Lightning
     elif isinstance(ckpt, dict) and "model_state" in ckpt:
-        state = ckpt["model_state"]         # your old manual checkpoints
+        state = ckpt["model_state"]         # optional legacy format
     elif isinstance(ckpt, dict):
-        # sometimes people save raw state_dict directly
-        state = ckpt
+        state = ckpt                        # raw state_dict
     else:
         raise TypeError(f"Unexpected checkpoint type: {type(ckpt)}")
 
-    # 2) keep ONLY the decoder weights and map keys to model.mlp.*
-    mlp_state = {}
+    # Keep ONLY decoder weights and map keys if needed
+    decoder_state = {}
     for k, v in state.items():
-        if k.startswith("model.mlp."):
-            mlp_state[k] = v
-        elif k.startswith("mlp."):
-            mlp_state["model." + k] = v  # turn "mlp.0.weight" -> "model.mlp.0.weight"
+        # Lightning keys
+        if k.startswith("model.fcs.") or k.startswith("model.out."):
+            decoder_state[k] = v
+        # Raw model keys
+        elif k.startswith("fcs.") or k.startswith("out."):
+            decoder_state["model." + k] = v
 
-    if not mlp_state:
-        # helpful debug print
-        some_keys = list(state.keys())[:30]
+    if not decoder_state:
+        some_keys = list(state.keys())[:50]
         raise RuntimeError(
-            "Could not find any MLP keys in checkpoint. "
+            "Could not find any decoder keys (fcs/out) in checkpoint. "
             f"First keys: {some_keys}"
         )
 
-    missing, unexpected = model.load_state_dict(mlp_state, strict=False)
+    missing, unexpected = model.load_state_dict(decoder_state, strict=False)
 
-    print(f"[eval] Loaded decoder (MLP only) from {ckpt_path}")
+    print(f"[eval] Loaded decoder (fcs+out only) from {ckpt_path}")
     if unexpected:
         print(f"[eval] Unexpected keys: {unexpected}")
-    # missing will include: "latent.*" which is expected (we ignore embedding at eval)
-
+    # missing will include latent.* which is expected
 
 
 @torch.no_grad()
-def eval_loss(model: Network1SDF, z: torch.Tensor, xyz: torch.Tensor, sdf: torch.Tensor) -> float:
-    """Compute mean L1 loss for a fixed latent z on a set of points."""
-    B = xyz.shape[0]
-    zB = z.view(1, -1).expand(B, -1)
-    pred = model.mlp(torch.cat([zB, xyz], dim=1))
-    return float(torch.mean(torch.abs(pred - sdf)).item())
+def clamped_l1(pred, target, delta):
+    if delta is None:
+        return torch.mean(torch.abs(pred - target))
+    pred_c = torch.clamp(pred, -delta, delta)
+    tgt_c = torch.clamp(target, -delta, delta)
+    return torch.mean(torch.abs(pred_c - tgt_c))
 
 
-def optimize_latent_for_geom(
-    model: Network1SDF,
-    xyz_fit: torch.Tensor,
-    sdf_fit: torch.Tensor,
-    latent_dim: int,
-    latent_init_std: float,
-    latent_lr: float,
-    latent_steps: int,
-    latent_l2_weight: float,
-    device: torch.device,
-) -> torch.Tensor:
+@torch.no_grad()
+def eval_loss(model, z, xyz, sdf, delta):
+    pred = model.forward_with_latent(z, xyz)
+    return float(clamped_l1(pred, sdf, delta=delta).item())
+
+
+def optimize_latent_for_geom( model, xyz_fit, sdf_fit, latent_dim, latent_init_std, latent_lr, latent_steps, latent_l2_weight, delta, device):
     """
     Optimize a fresh latent vector z for one geometry with decoder frozen.
+    Uses the same (clamped) reconstruction loss as training for consistency.
     """
-    # fresh latent for this geometry
     z = torch.randn(latent_dim, device=device) * float(latent_init_std)
     z = torch.nn.Parameter(z)
 
@@ -104,11 +101,9 @@ def optimize_latent_for_geom(
         p.requires_grad_(False)  # freeze decoder
 
     for _ in range(int(latent_steps)):
-        B = xyz_fit.shape[0]
-        zB = z.view(1, -1).expand(B, -1)
-        pred = model.mlp(torch.cat([zB, xyz_fit], dim=1))
+        pred = model.forward_with_latent(z, xyz_fit)
 
-        sdf_l1 = torch.mean(torch.abs(pred - sdf_fit))
+        sdf_l1 = clamped_l1(pred, sdf_fit, delta=delta)
         reg = torch.mean(z ** 2)
         loss = sdf_l1 + float(latent_l2_weight) * reg
 
@@ -121,13 +116,18 @@ def optimize_latent_for_geom(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt", type=str, required=True, help="Path to network1 checkpoint (.pt)")
+    parser.add_argument("--ckpt", type=str, required=True, help="Path to network1 checkpoint (.ckpt/.pt)")
     parser.add_argument("--fit_frac", type=float, default=0.5, help="Fraction of points used to fit z (rest for eval)")
     parser.add_argument("--latent_steps", type=int, default=800, help="Optimization steps for each test geometry latent")
     parser.add_argument("--latent_lr", type=float, default=1e-2, help="LR for latent optimization")
-    parser.add_argument("--latent_init_std", type=float, default=0.01, help="Init std for z")
+    parser.add_argument("--latent_init_std", type=float, default=0.012, help="Init std for z (match training by default)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out_csv", type=str, default="network1_test_latent_opt.csv")
+    parser.add_argument(
+        "--use_clamped_loss",
+        action="store_true",
+        help="If set, evaluate and fit using the same clamped loss as training.",
+    )
     args = parser.parse_args()
 
     cfg = Network1Config()
@@ -146,18 +146,33 @@ def main():
 
     # Load training normalization stats (computed on train geometries)
     stats = load_normalisation_stats(cfg.stats_path)
+    sdf_scale = float(stats["sdf_scale"]) if float(stats["sdf_scale"]) != 0 else 1.0
+
     transform = SDFTransform(
         xyz_mean=stats["xyz_mean"],
         xyz_std=stats["xyz_std"],
-        sdf_scale=float(stats["sdf_scale"]),
+        sdf_scale=sdf_scale,
     )
 
-    # Build a model with dummy embedding size; we will only use model.mlp
+    # Delta in normalized SDF units (because dataset divides sdf by sdf_scale)
+    if args.use_clamped_loss:
+        delta_phys = float(getattr(cfg, "truncation_delta", 0.05))
+        delta_norm = delta_phys / max(sdf_scale, 1e-12)
+        print(f"[eval] Using clamped loss: delta_phys={delta_phys}  sdf_scale={sdf_scale}  delta_norm={delta_norm}")
+    else:
+        delta_norm = None
+        print("[eval] Using unclamped L1 loss (not directly comparable to training clamped loss).")
+
+    # Build a model with dummy embedding size; we will optimize z explicitly at test time
     model = Network1SDF(
-        num_geometries=1,  # dummy, not used in evaluation
+        num_geometries=1,  # dummy
         latent_dim=cfg.latent_dim,
         hidden_dim=cfg.hidden_dim,
         depth=cfg.depth,
+        latent_init_std=float(getattr(cfg, "latent_init_std", 0.012)),
+        activation=getattr(cfg, "activation", "relu"),
+        use_skip=bool(getattr(cfg, "use_skip", True)),
+        skip_layer=getattr(cfg, "skip_layer", None),
     ).to(device)
 
     load_decoder_only(model, Path(args.ckpt))
@@ -196,24 +211,25 @@ def main():
             xyz_fit=xyz_fit,
             sdf_fit=sdf_fit,
             latent_dim=cfg.latent_dim,
-            latent_init_std=args.latent_init_std,
-            latent_lr=args.latent_lr,
-            latent_steps=args.latent_steps,
-            latent_l2_weight=cfg.latent_l2_weight,
+            latent_init_std=float(args.latent_init_std),
+            latent_lr=float(args.latent_lr),
+            latent_steps=int(args.latent_steps),
+            latent_l2_weight=float(cfg.latent_l2_weight),
+            delta=delta_norm,
             device=device,
         )
 
         # Evaluate
-        fit_l1 = eval_loss(model, z, xyz_fit, sdf_fit)
-        eval_l1 = eval_loss(model, z, xyz_eval, sdf_eval)
+        fit_l1 = eval_loss(model, z, xyz_fit, sdf_fit, delta=delta_norm)
+        eval_l1 = eval_loss(model, z, xyz_eval, sdf_eval, delta=delta_norm)
 
         results.append({
-            "geometry_id": int(gid),
-            "n_points": int(N),
-            "n_fit": int(n_fit),
-            "n_eval": int(N - n_fit),
-            "fit_l1": float(fit_l1),
-            "eval_l1": float(eval_l1),
+            "geometry_id"(gid),
+            "n_points"(N),
+            "n_fit"(n_fit),
+            "n_eval"(N - n_fit),
+            "fit_l1"(fit_l1),
+            "eval_l1"(eval_l1),
         })
 
         print(f"[eval] gid={gid} fit_l1={fit_l1:.6f} eval_l1={eval_l1:.6f}")
@@ -221,6 +237,7 @@ def main():
     df = pd.DataFrame(results).sort_values("geometry_id").reset_index(drop=True)
     out_path = Path(args.out_csv)
     df.to_csv(out_path, index=False)
+
     print(f"[eval] Saved results to {out_path}")
     print(f"[eval] Mean eval_l1 = {df['eval_l1'].mean():.6f}")
 

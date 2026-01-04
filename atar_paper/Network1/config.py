@@ -48,7 +48,7 @@ class MetadataConfig:
     )
 
     seed: int = 0
-    test_frac: int = 0.2
+    test_frac: float = 0.2
 
 
 @dataclass(frozen=True)
@@ -75,6 +75,7 @@ class Network1Config:
     num_workers: int = 0
     shuffle: bool = True
     use_balanced_batches: bool = True
+    geoms_per_batch: int = 3
     samples_per_geom_in_batch: int = 256
 
     # Model

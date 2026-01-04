@@ -122,19 +122,27 @@ class BalancedGeomBatchSampler(Sampler[List[int]]):
         Geometry id per sample.
     """
 
-    def __init__(self, dataset, samples_per_geom, seed=0):
+    def __init__(self, dataset, geoms_per_batch, samples_per_geom, seed=0):
         self.dataset = dataset
+        self.geoms_per_batch = int(geoms_per_batch)
         self.samples_per_geom = int(samples_per_geom)
         self.seed = int(seed)
         self.epoch = 0
 
         geom_ids = dataset.geom_id
         self.unique_gids = np.unique(geom_ids).astype(np.int64).tolist()
+        if len(self.unique_gids) == 0:
+            raise RuntimeError("No geometries found in dataset.geom_id")
+        
+        # Clamp geoms_per_batch to available geometries
+        self.geoms_per_batch = max(1, min(self.geoms_per_batch, len(self.unique_gids)))
+
         self.idx_by_gid = {                                           # key = geometry id
             gid: np.where(geom_ids == gid)[0].astype(np.int64)        # value = all dataset indices belonging to that geometry
             for gid in self.unique_gids}
-        min_count = min(len(v) for v in self.idx_by_gid.values())     # Smallest number of samples among geometries.
-        self.num_batches = max(1, min_count // self.samples_per_geom) # Number of batches we can draw before any geometry “runs out” of samples (roughly).
+        
+        self.num_batches = int(np.ceil(len(self.unique_gids) / self.geoms_per_batch))
+
 
     def set_epoch(self, epoch):
         self.epoch = int(epoch)
@@ -145,31 +153,43 @@ class BalancedGeomBatchSampler(Sampler[List[int]]):
     def __iter__(self):
         rng = np.random.default_rng(self.seed + self.epoch)
 
+        # Shuffle geometry order each epoch
+        gids = np.array(self.unique_gids, dtype=np.int64)
+        rng.shuffle(gids)
+
+        # Create shuffled pools per geometry and pointers
         pools = {}
         ptrs = {}
-        for gid, idxs in self.idx_by_gid.items():
-            pool = idxs.copy() 
-            rng.shuffle(pool)   # For each geometry: shuffle its index list
-            pools[gid] = pool   # store as pools
-            ptrs[gid] = 0 # tracks where we are in that pool
+        for gid in gids:
+            gid = int(gid)
+            pool = self.idx_by_gid[gid].copy()
+            rng.shuffle(pool)
+            pools[gid] = pool
+            ptrs[gid] = 0
 
-        for _ in range(self.num_batches):
+        # Split gids into batches
+        for b in range(self.num_batches):
+            start = b * self.geoms_per_batch
+            end = min((b + 1) * self.geoms_per_batch, len(gids))
+            batch_gids = gids[start:end]
+
             batch = []
-            for gid in self.unique_gids:
-                # Get current pool and pointer for that geometry.
+            for gid in batch_gids:
+                gid = int(gid)
                 pool = pools[gid]
                 p = ptrs[gid]
 
-                if p + self.samples_per_geom > len(pool): # if run past the end
+                # Refresh if not enough remaining
+                if p + self.samples_per_geom > len(pool):
                     pool = self.idx_by_gid[gid].copy()
-                    rng.shuffle(pool) # reshuffle a fresh pool
+                    rng.shuffle(pool)
                     pools[gid] = pool
-                    p = 0 # restart pointer at 0
+                    p = 0
 
-                batch.extend(pool[p : p + self.samples_per_geom].tolist()) 
+                batch.extend(pool[p : p + self.samples_per_geom].tolist())
                 ptrs[gid] = p + self.samples_per_geom
 
-            rng.shuffle(batch) # Shuffle combined batch (mix geometries)
+            rng.shuffle(batch)
             yield batch
 
 def split_indices_by_geometry(geom_id, val_frac, seed):
@@ -305,7 +325,12 @@ def build_sdf_dataloader(cfg):
 
     # loaders
     if cfg.use_balanced_batches:
-        sampler = BalancedGeomBatchSampler(train_ds, samples_per_geom=cfg.samples_per_geom_in_batch, seed=cfg.seed)
+        sampler = BalancedGeomBatchSampler(
+            train_ds,
+            geoms_per_batch=int(getattr(cfg, "geoms_per_batch", len(np.unique(train_ds.geom_id)))),
+            samples_per_geom=int(cfg.samples_per_geom_in_batch),
+            seed=int(cfg.seed),
+        )
         train_loader = DataLoader(train_ds, batch_sampler=sampler, num_workers=cfg.num_workers, pin_memory=True)
     else:
         train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True,
@@ -317,4 +342,4 @@ def build_sdf_dataloader(cfg):
     test_loader = DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=False,
                              num_workers=cfg.num_workers, pin_memory=True)
 
-    return train_loader, val_loader, test_loader, len(train_gids), len(test_gids)
+    return train_loader, val_loader, test_loader, len(train_gids), len(test_gids), stats

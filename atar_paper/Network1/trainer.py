@@ -21,17 +21,21 @@ def latent_l2_regularizer(model, geom_id):
 
 
 class Network1LitModule(pl.LightningModule):
-    def __init__(self, cfg, num_train_geoms):
+    def __init__(self, cfg, num_train_geoms, stats):
         super().__init__()
-        self.save_hyperparameters(ignore=["cfg"])  
+        self.save_hyperparameters(ignore=["cfg", "stats"])
         self.cfg = cfg
+
+        self.sdf_scale = float(stats.get("sdf_scale", 1.0))
+        if self.sdf_scale == 0:
+            self.sdf_scale = 1.0
 
         self.model = Network1SDF(
             num_geometries=num_train_geoms,
             latent_dim=cfg.latent_dim,
             hidden_dim=cfg.hidden_dim,
             depth=cfg.depth,
-            latent_init_std=getattr(cfg, "latent_init_std", 0.0),
+            latent_init_std=getattr(cfg, "latent_init_std", 0.012),
             activation=getattr(cfg, "activation", "relu"),
         )
 
@@ -42,7 +46,8 @@ class Network1LitModule(pl.LightningModule):
         geom_id, xyz, sdf = batch
         pred = self(geom_id, xyz)
 
-        delta = float(getattr(self.cfg, "explicit_truncation_delta", 0.05))
+        delta = float(getattr(self.cfg, "truncation_delta", 0.05))
+        delta = delta / max(self.sdf_scale, 1e-12)
         sdf_l = sdf_loss_l1(pred, sdf, delta=delta)
 
         reg_l = latent_l2_regularizer(self.model, geom_id)

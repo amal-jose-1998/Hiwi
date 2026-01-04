@@ -9,6 +9,8 @@ from .config import Network1Config
 from .data import build_sdf_dataloader  
 from .trainer import Network1LitModule
 
+from pathlib import Path
+
 
 def set_seed(seed: int):
     random.seed(seed)
@@ -24,12 +26,12 @@ def main():
     cfg = Network1Config()
     set_seed(cfg.seed)
 
-    # IMPORTANT: Your build_sdf_dataloader must return:
-    # train_loader, test_loader, n_train_geoms, n_test_geoms
-    train_loader, val_loader, test_loader, n_train_geoms, n_test_geoms = build_sdf_dataloader(cfg)
+    Path(cfg.ckpt_dir).mkdir(parents=True, exist_ok=True)
+
+    train_loader, val_loader, test_loader, n_train_geoms, n_test_geoms, stats = build_sdf_dataloader(cfg)
     print(f"[train_network1] train_geoms={n_train_geoms}, test_geoms={n_test_geoms}")
 
-    lit_model = Network1LitModule(cfg=cfg, num_train_geoms=n_train_geoms)
+    lit_model = Network1LitModule(cfg=cfg, num_train_geoms=n_train_geoms, stats=stats)
 
     early_cb = EarlyStopping(
         monitor="val/loss",
@@ -40,8 +42,9 @@ def main():
 
     ckpt_cb = ModelCheckpoint(
         dirpath=cfg.ckpt_dir,
-        filename="network1-{epoch:03d}-{train_loss:.4f}",
-        save_top_k=-1,               # keep all, or set top_k=3
+        monitor="val/loss",
+        filename="network1-{epoch:03d}-{val_loss:.4f}",
+        save_top_k=3,              
         every_n_epochs=cfg.save_every,
         save_last=True,
     )
