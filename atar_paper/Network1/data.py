@@ -9,6 +9,11 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 
+stats = {
+    "xyz_mean": np.zeros(3, dtype=np.float32),
+    "xyz_std": np.ones(3, dtype=np.float32),
+    "sdf_scale": np.array(1.0, dtype=np.float32),
+}
 
 class ToolSDFDataset(Dataset):
     """
@@ -91,23 +96,23 @@ class ToolSDFDataset(Dataset):
         )
 
 
-class SDFTransform:
-    """
-    Normalisation transform for SDF training.
-
-    - Normalises xyz using mean/std
-    - Scales sdf by sdf_scale (max(|sdf|) from training set)
-    """
-
-    def __init__(self, xyz_mean, xyz_std, sdf_scale):
-        self.xyz_mean = xyz_mean.astype(np.float32)
-        self.xyz_std = np.where(xyz_std == 0, 1.0, xyz_std).astype(np.float32)
-        self.sdf_scale = float(sdf_scale) if float(sdf_scale) != 0 else 1.0
-
-    def __call__(self, xyz, sdf):
-        xyz_norm = (xyz - self.xyz_mean) / self.xyz_std
-        sdf_norm = sdf / self.sdf_scale
-        return xyz_norm.astype(np.float32), sdf_norm.astype(np.float32)
+#class SDFTransform:
+#    """
+#    Normalisation transform for SDF training.
+#
+#    - Normalises xyz using mean/std
+#    - Scales sdf by sdf_scale (max(|sdf|) from training set)
+#    """
+#
+#    def __init__(self, xyz_mean, xyz_std, sdf_scale):
+#        self.xyz_mean = xyz_mean.astype(np.float32)
+#        self.xyz_std = np.where(xyz_std == 0, 1.0, xyz_std).astype(np.float32)
+#        self.sdf_scale = float(sdf_scale) if float(sdf_scale) != 0 else 1.0
+#
+#    def __call__(self, xyz, sdf):
+#        xyz_norm = (xyz - self.xyz_mean) / self.xyz_std
+#        sdf_norm = sdf / self.sdf_scale
+#        return xyz_norm.astype(np.float32), sdf_norm.astype(np.float32)
 
 
 class BalancedGeomBatchSampler(Sampler[List[int]]):
@@ -236,45 +241,45 @@ def subset_toolsdf_dataset(ds, idx):
     out.num_geometries = int(out.geom_id.max()) + 1  # still safe
     return out
 
-def fit_normalisation_stats(dataset):
-    """
-    Compute normalisation statistics from an unnormalised dataset.
-    """
-    xyz = dataset.xyz
-    sdf = dataset.sdf
-
-    xyz_mean = xyz.mean(axis=0)
-    xyz_std = xyz.std(axis=0)
-
-    sdf_abs_max = float(np.abs(sdf).max())
-    sdf_scale = sdf_abs_max if sdf_abs_max > 0 else 1.0
-
-    return {
-        "xyz_mean": xyz_mean,
-        "xyz_std": xyz_std,
-        "sdf_scale": np.array(sdf_scale, dtype=np.float32),
-    }
-
-
-def save_normalisation_stats(stats, path):
-    """
-    Save normalisation stats to disk as a .npz file.
-    """
-    path = Path(path)
-    np.savez(path, xyz_mean=stats["xyz_mean"], xyz_std=stats["xyz_std"], sdf_scale=stats["sdf_scale"])
-    print(f"[network1.data] Saved normalisation stats to {path}")
+#def fit_normalisation_stats(dataset):
+#    """
+#    Compute normalisation statistics from an unnormalised dataset.
+#    """
+#    xyz = dataset.xyz
+#    sdf = dataset.sdf
+#
+#    xyz_mean = xyz.mean(axis=0)
+#    xyz_std = xyz.std(axis=0)
+#
+#    sdf_abs_max = float(np.abs(sdf).max())
+#    sdf_scale = sdf_abs_max if sdf_abs_max > 0 else 1.0
+#
+#    return {
+#        "xyz_mean": xyz_mean,
+#        "xyz_std": xyz_std,
+#        "sdf_scale": np.array(sdf_scale, dtype=np.float32),
+#    }
 
 
-def load_normalisation_stats(path):
-    """
-    Load normalisation stats saved by save_normalisation_stats().
-    """
-    data = np.load(Path(path))
-    return {
-        "xyz_mean": data["xyz_mean"],
-        "xyz_std": data["xyz_std"],
-        "sdf_scale": data["sdf_scale"],
-    }
+#def save_normalisation_stats(stats, path):
+#    """
+#    Save normalisation stats to disk as a .npz file.
+#    """
+#    path = Path(path)
+#    np.savez(path, xyz_mean=stats["xyz_mean"], xyz_std=stats["xyz_std"], sdf_scale=stats["sdf_scale"])
+#    print(f"[network1.data] Saved normalisation stats to {path}")
+
+
+#def load_normalisation_stats(path):
+#    """
+#    Load normalisation stats saved by save_normalisation_stats().
+#    """
+#    data = np.load(Path(path))
+#    return {
+#        "xyz_mean": data["xyz_mean"],
+#        "xyz_std": data["xyz_std"],
+#        "sdf_scale": data["sdf_scale"],
+#    }
 
 
 def build_sdf_dataloader(cfg):
@@ -295,25 +300,26 @@ def build_sdf_dataloader(cfg):
 
     train_gid_to_local = {int(gid): i for i, gid in enumerate(train_gids)}
 
-    raw_train = ToolSDFDataset(cfg.sdf_dir, transform=None, allowed_geom_ids=train_gids, gid_remap=train_gid_to_local)
+    #raw_train = ToolSDFDataset(cfg.sdf_dir, transform=None, allowed_geom_ids=train_gids, gid_remap=train_gid_to_local)
 
     # Compute stats once and cache them, or load if already computed.
-    stats_file = Path(cfg.stats_path)
-    if not stats_file.is_file():
-        stats = fit_normalisation_stats(raw_train)
-        save_normalisation_stats(stats, cfg.stats_path)
-    else:
-        stats = load_normalisation_stats(cfg.stats_path)
+    #stats_file = Path(cfg.stats_path)
+    #if not stats_file.is_file():
+    #    stats = fit_normalisation_stats(raw_train)
+    #    save_normalisation_stats(stats, cfg.stats_path)
+    #else:
+    #    stats = load_normalisation_stats(cfg.stats_path)
 
-    transform = SDFTransform(
-        xyz_mean=stats["xyz_mean"],
-        xyz_std=stats["xyz_std"],
-        sdf_scale=float(stats["sdf_scale"]),
-    )
+    #transform = SDFTransform(
+    #    xyz_mean=stats["xyz_mean"],
+    #    xyz_std=stats["xyz_std"],
+    #    sdf_scale=float(stats["sdf_scale"]),
+    #)
+
     # create dataset with transform applied
-
     # ---------- transformed full train dataset ----------
-    train_full = ToolSDFDataset( cfg.sdf_dir, transform=transform, allowed_geom_ids=train_gids, gid_remap=train_gid_to_local)
+    #train_full = ToolSDFDataset( cfg.sdf_dir, transform=transform, allowed_geom_ids=train_gids, gid_remap=train_gid_to_local)
+    train_full = ToolSDFDataset(cfg.sdf_dir, transform=None, allowed_geom_ids=train_gids, gid_remap=train_gid_to_local)
     # ---------- point-level val split within train ----------
     val_frac = float(getattr(cfg, "val_frac", 0.1))
     train_idx, val_idx = split_indices_by_geometry(train_full.geom_id, val_frac=val_frac, seed=int(cfg.seed))
@@ -321,7 +327,8 @@ def build_sdf_dataloader(cfg):
     val_ds   = subset_toolsdf_dataset(train_full, val_idx)
 
     # ---------- test dataset ----------
-    test_ds = ToolSDFDataset(cfg.sdf_dir, transform=transform, allowed_geom_ids=test_gids)
+    #test_ds = ToolSDFDataset(cfg.sdf_dir, transform=transform, allowed_geom_ids=test_gids)
+    test_ds = ToolSDFDataset(cfg.sdf_dir, transform=None, allowed_geom_ids=test_gids)
 
     # loaders
     if cfg.use_balanced_batches:

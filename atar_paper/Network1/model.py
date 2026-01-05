@@ -35,7 +35,7 @@ class Network1SDF(nn.Module):
             Predicted signed distance values.
     """
 
-    def __init__(self, num_geometries, latent_dim=128, hidden_dim=256, depth=4, latent_init_std=0.012, activation="relu", use_skip=True, skip_layer=None,):
+    def __init__(self, num_geometries, latent_dim=128, hidden_dim=256, depth=4, latent_init_std=0.012, activation="relu", use_skip=True, skip_layer=None, softplus_beta=20.0):
         super().__init__()
 
         if depth < 2:
@@ -51,35 +51,44 @@ class Network1SDF(nn.Module):
         nn.init.normal_(self.latent.weight, mean=0.0, std=float(latent_init_std))
 
         if activation == "relu":
-            act = nn.ReLU(inplace=True)
+            def make_act():
+                return nn.ReLU(inplace=False)
         elif activation == "softplus":
-            act = nn.Softplus(beta=100)  
+            beta = float(softplus_beta)
+
+            def make_act():
+                return nn.Softplus(beta=beta)
         else:
             raise ValueError(f"Unknown activation: {activation}")
         
         self.use_skip = bool(use_skip)
-        num_hidden = depth - 1  # hidden Linear count
+        num_hidden = depth - 1  # number of hidden Linear layer
+
         if self.use_skip:
             if skip_layer is None:
                 skip_layer = max(0, (num_hidden // 2) - 1)
             self.skip_layer = int(skip_layer)
+            if not (0 <= self.skip_layer < num_hidden):
+                raise ValueError(f"skip_layer must be in [0, {num_hidden-1}] (got {self.skip_layer})")
         else:
             self.skip_layer = -1
 
         self.fcs = nn.ModuleList()
         self.acts = nn.ModuleList()
 
-        in_dim = self.latent_dim + 3
+        base_in_dim = self.latent_dim + 3  # (z, xyz)
+        in_dim = base_in_dim
 
         for h in range(num_hidden):
-            # If we inject skip AFTER layer h, we need next layer to accept extra inputs.
-            self.fcs.append(nn.Linear(in_dim, hidden_dim))
-            self.acts.append(act)
-            in_dim = hidden_dim
+            self.fcs.append(nn.Linear(in_dim, self.hidden_dim))
+            self.acts.append(make_act())
+            
+            # Default next input is hidden_dim...
+            in_dim = self.hidden_dim
 
-            # After this hidden layer, if it's the skip point, the next layer input will grow
+            # ...but if we inject skip AFTER this layer, next layer input grows.
             if self.use_skip and h == self.skip_layer:
-                in_dim = hidden_dim + (self.latent_dim + 3)
+                in_dim = self.hidden_dim + base_in_dim
 
         self.out = nn.Linear(in_dim, 1)
 

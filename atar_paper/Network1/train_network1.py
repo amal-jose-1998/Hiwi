@@ -54,7 +54,7 @@ def main():
         accelerator="gpu" if (cfg.device == "cuda" and torch.cuda.is_available()) else "cpu",
         devices=1,
         callbacks=[ckpt_cb, early_cb],
-        log_every_n_steps=10,
+        log_every_n_steps=2,
     )
 
     trainer.fit(lit_model, train_dataloaders=train_loader, val_dataloaders=val_loader)

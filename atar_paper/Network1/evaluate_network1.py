@@ -24,7 +24,7 @@ import torch
 
 from .config import Network1Config
 from .model import Network1SDF
-from .data import load_normalisation_stats, SDFTransform
+#from .data import load_normalisation_stats, SDFTransform
 
 
 def load_decoder_only(model, ckpt_path):
@@ -54,7 +54,7 @@ def load_decoder_only(model, ckpt_path):
             decoder_state[k] = v
         # Raw model keys
         elif k.startswith("fcs.") or k.startswith("out."):
-            decoder_state["model." + k] = v
+            decoder_state[k] = v
 
     if not decoder_state:
         some_keys = list(state.keys())[:50]
@@ -145,22 +145,21 @@ def main():
     print(f"[eval] #test_geometries={len(test_gids)} -> {test_gids}")
 
     # Load training normalization stats (computed on train geometries)
-    stats = load_normalisation_stats(cfg.stats_path)
-    sdf_scale = float(stats["sdf_scale"]) if float(stats["sdf_scale"]) != 0 else 1.0
+    #stats = load_normalisation_stats(cfg.stats_path)
+    #sdf_scale = float(stats["sdf_scale"]) if float(stats["sdf_scale"]) != 0 else 1.0
 
-    transform = SDFTransform(
-        xyz_mean=stats["xyz_mean"],
-        xyz_std=stats["xyz_std"],
-        sdf_scale=sdf_scale,
-    )
+    #transform = SDFTransform(
+    #    xyz_mean=stats["xyz_mean"],
+    #    xyz_std=stats["xyz_std"],
+    #    sdf_scale=sdf_scale,
+    #)
 
-    # Delta in normalized SDF units (because dataset divides sdf by sdf_scale)
     if args.use_clamped_loss:
-        delta_phys = float(getattr(cfg, "truncation_delta", 0.05))
-        delta_norm = delta_phys / max(sdf_scale, 1e-12)
-        print(f"[eval] Using clamped loss: delta_phys={delta_phys}  sdf_scale={sdf_scale}  delta_norm={delta_norm}")
+        delta = float(getattr(cfg, "truncation_delta", 0.05))
+        #delta = delta / max(sdf_scale, 1e-12)
+        print(f"[eval] Using clamped loss: delta={delta}")
     else:
-        delta_norm = None
+        delta = None
         print("[eval] Using unclamped L1 loss (not directly comparable to training clamped loss).")
 
     # Build a model with dummy embedding size; we will optimize z explicitly at test time
@@ -190,20 +189,20 @@ def main():
         sdf = data["sdf"].astype(np.float32)[:, None]
 
         # Apply same normalization used in training
-        xyz_n, sdf_n = transform(xyz, sdf)
+        #xyz, sdf = transform(xyz, sdf)
 
         # Split into fit/eval subsets
-        N = xyz_n.shape[0]
+        N = xyz.shape[0]
         perm = rng.permutation(N)
         n_fit = int(np.round(float(args.fit_frac) * N))
         n_fit = max(1, min(n_fit, N - 1))
         fit_idx = perm[:n_fit]
         eval_idx = perm[n_fit:]
 
-        xyz_fit = torch.from_numpy(xyz_n[fit_idx]).to(device)
-        sdf_fit = torch.from_numpy(sdf_n[fit_idx]).to(device)
-        xyz_eval = torch.from_numpy(xyz_n[eval_idx]).to(device)
-        sdf_eval = torch.from_numpy(sdf_n[eval_idx]).to(device)
+        xyz_fit = torch.from_numpy(xyz[fit_idx]).to(device)
+        sdf_fit = torch.from_numpy(sdf[fit_idx]).to(device)
+        xyz_eval = torch.from_numpy(xyz[eval_idx]).to(device)
+        sdf_eval = torch.from_numpy(sdf[eval_idx]).to(device)
 
         # Optimize latent
         z = optimize_latent_for_geom(
@@ -215,21 +214,21 @@ def main():
             latent_lr=float(args.latent_lr),
             latent_steps=int(args.latent_steps),
             latent_l2_weight=float(cfg.latent_l2_weight),
-            delta=delta_norm,
+            delta=delta,
             device=device,
         )
 
         # Evaluate
-        fit_l1 = eval_loss(model, z, xyz_fit, sdf_fit, delta=delta_norm)
-        eval_l1 = eval_loss(model, z, xyz_eval, sdf_eval, delta=delta_norm)
+        fit_l1 = eval_loss(model, z, xyz_fit, sdf_fit, delta=delta)
+        eval_l1 = eval_loss(model, z, xyz_eval, sdf_eval, delta=delta)
 
         results.append({
-            "geometry_id"(gid),
-            "n_points"(N),
-            "n_fit"(n_fit),
-            "n_eval"(N - n_fit),
-            "fit_l1"(fit_l1),
-            "eval_l1"(eval_l1),
+            "geometry_id": int(gid),
+            "n_points": int(N),
+            "n_fit": int(n_fit),
+            "n_eval": int(N - n_fit),
+            "fit_l1": float(fit_l1),
+            "eval_l1": float(eval_l1),
         })
 
         print(f"[eval] gid={gid} fit_l1={fit_l1:.6f} eval_l1={eval_l1:.6f}")

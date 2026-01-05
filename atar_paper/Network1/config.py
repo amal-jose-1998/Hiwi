@@ -74,8 +74,9 @@ class Network1Config:
     batch_size: int = 2048
     num_workers: int = 0
     shuffle: bool = True
+    
     use_balanced_batches: bool = True
-    geoms_per_batch: int = 3
+    geoms_per_batch: int = 5
     samples_per_geom_in_batch: int = 256
 
     # Model
@@ -86,20 +87,20 @@ class Network1Config:
     activation: Literal["relu", "softplus"] = "relu"
     truncation_delta: float = 0.05
     use_skip: bool = True
-    skip_layer: int | None = None
+    skip_layer: int | None = 1
 
     # Optim
     lr: float = 1e-4
     weight_decay: float = 0.0
     latent_l2_weight: float = 1e-4
 
-     # LR schedule 
-    lr_step_size_epochs: int = 50
+    # LR schedule 
+    lr_step_size_epochs: int = 200
     lr_gamma: float = 0.5
     lr_min: float = 5e-6
 
     # Training
-    epochs: int = 500
+    epochs: int = 2000
     seed: int = 0
     device: str = "cuda"
 

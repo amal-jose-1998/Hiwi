@@ -47,7 +47,7 @@ class Network1LitModule(pl.LightningModule):
         pred = self(geom_id, xyz)
 
         delta = float(getattr(self.cfg, "truncation_delta", 0.05))
-        delta = delta / max(self.sdf_scale, 1e-12)
+        #delta = delta / max(self.sdf_scale, 1e-12)
         sdf_l = sdf_loss_l1(pred, sdf, delta=delta)
 
         reg_l = latent_l2_regularizer(self.model, geom_id)
