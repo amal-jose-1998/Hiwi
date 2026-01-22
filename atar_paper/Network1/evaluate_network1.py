@@ -1,7 +1,6 @@
 """
 Proper evaluation for held-out geometries in an auto-decoder SDF setup.
 
-Protocol:
 - Load trained decoder weights from a Lightning checkpoint (.ckpt) or a raw state_dict/.pt.
 - For each TEST geometry:
     * load its SDF samples (points, sdf) from tool_geom{gid}_sdf.npz
@@ -9,15 +8,9 @@ Protocol:
     * freeze decoder
     * optimize a fresh latent vector z_g to fit that geometry (clamped L1 + lambda||z||^2)
     * report fit/eval loss on held-out points for that geometry
-
-This is the correct "test" for geometry-level split in an auto-decoder.
 """
 
-from __future__ import annotations
-
-import argparse
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import torch
@@ -25,6 +18,37 @@ import torch
 from .config import Network1Config
 from .model import Network1SDF
 #from .data import load_normalisation_stats, SDFTransform
+
+
+def build_model_from_ckpt(ckpt, device):
+    cfg = Network1Config()
+
+    # get state_dict
+    if isinstance(ckpt, dict) and "state_dict" in ckpt:
+        state = ckpt["state_dict"]
+    elif isinstance(ckpt, dict) and "model_state" in ckpt:
+        state = ckpt["model_state"]
+    elif isinstance(ckpt, dict):
+        state = ckpt
+    else:
+        raise TypeError(f"Unexpected checkpoint type: {type(ckpt)}")
+
+    latent_dim, hidden_dim, depth, use_skip, skip_layer, activation, latent_init_std = infer_arch_from_state_dict(
+        state, cfg_fallback=cfg
+    )
+
+    model = Network1SDF(
+        num_geometries=1,
+        latent_dim=latent_dim,
+        hidden_dim=hidden_dim,
+        depth=depth,
+        latent_init_std=latent_init_std,
+        activation=activation,
+        use_skip=use_skip,
+        skip_layer=skip_layer,
+    ).to(device)
+
+    return model, latent_dim, state
 
 
 def load_decoder_only(model, ckpt_path):
@@ -51,7 +75,7 @@ def load_decoder_only(model, ckpt_path):
     for k, v in state.items():
         # Lightning keys
         if k.startswith("model.fcs.") or k.startswith("model.out."):
-            decoder_state[k] = v
+            decoder_state[k[len("model."):]] = v  # => "fcs.*" or "out.*"
         # Raw model keys
         elif k.startswith("fcs.") or k.startswith("out."):
             decoder_state[k] = v
@@ -66,10 +90,10 @@ def load_decoder_only(model, ckpt_path):
     missing, unexpected = model.load_state_dict(decoder_state, strict=False)
 
     print(f"[eval] Loaded decoder (fcs+out only) from {ckpt_path}")
+    if missing:
+        print(f"[eval] Missing keys (expected: latent.*): {missing}")
     if unexpected:
-        print(f"[eval] Unexpected keys: {unexpected}")
-    # missing will include latent.* which is expected
-
+        print(f"[eval] Unexpected keys (should be empty): {unexpected}")
 
 @torch.no_grad()
 def clamped_l1(pred, target, delta):
@@ -84,6 +108,59 @@ def clamped_l1(pred, target, delta):
 def eval_loss(model, z, xyz, sdf, delta):
     pred = model.forward_with_latent(z, xyz)
     return float(clamped_l1(pred, sdf, delta=delta).item())
+
+
+def infer_arch_from_state_dict(state, cfg_fallback):
+    """
+    Infer latent_dim, hidden_dim, depth, and skip_layer from state_dict shapes.
+
+    Works for Lightning keys ("model.fcs.*") or raw keys ("fcs.*").
+    """
+    # collect fc weight keys in order
+    def norm_key(k):
+        return k.replace("model.", "")  # strip if present
+
+    fc_w = []
+    for k, v in state.items():
+        nk = norm_key(k)
+        if nk.startswith("fcs.") and nk.endswith(".weight"):
+            # k like fcs.0.weight
+            idx = int(nk.split(".")[1])
+            fc_w.append((idx, v.shape))
+
+    if not fc_w:
+        raise RuntimeError("Could not find any fcs.*.weight in checkpoint.")
+
+    fc_w.sort(key=lambda x: x[0])
+
+    # infer dims
+    hidden_dim = int(fc_w[0][1][0])                  # out dim of first FC
+    base_in_dim = int(fc_w[0][1][1])                 # in dim of first FC = latent_dim + 3
+    latent_dim = base_in_dim - 3
+
+    num_hidden = len(fc_w)                           # number of fcs layers
+    depth = num_hidden + 1                           # + out layer
+
+    # infer skip_layer: find which fc layer has in_dim = hidden_dim + base_in_dim
+    skip_layer = None
+    for idx, shape in fc_w:
+        in_dim = int(shape[1])
+        if in_dim == hidden_dim + base_in_dim:
+            # this layer consumes concatenated [h, inp], so skip was applied after previous layer
+            skip_layer = idx - 1
+            break
+
+    use_skip = skip_layer is not None
+
+    # sanity print
+    print(f"[eval] Inferred from ckpt: latent_dim={latent_dim}, hidden_dim={hidden_dim}, depth={depth}, "
+          f"use_skip={use_skip}, skip_layer={skip_layer}")
+
+    # activation cannot be inferred reliably from weights; use cfg fallback
+    activation = getattr(cfg_fallback, "activation", "relu")
+    latent_init_std = float(getattr(cfg_fallback, "latent_init_std", 0.012))
+
+    return latent_dim, hidden_dim, depth, use_skip, skip_layer, activation, latent_init_std
 
 
 def optimize_latent_for_geom( model, xyz_fit, sdf_fit, latent_dim, latent_init_std, latent_lr, latent_steps, latent_l2_weight, delta, device):
@@ -115,26 +192,16 @@ def optimize_latent_for_geom( model, xyz_fit, sdf_fit, latent_dim, latent_init_s
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt", type=str, required=True, help="Path to network1 checkpoint (.ckpt/.pt)")
-    parser.add_argument("--fit_frac", type=float, default=0.5, help="Fraction of points used to fit z (rest for eval)")
-    parser.add_argument("--latent_steps", type=int, default=800, help="Optimization steps for each test geometry latent")
-    parser.add_argument("--latent_lr", type=float, default=1e-2, help="LR for latent optimization")
-    parser.add_argument("--latent_init_std", type=float, default=0.012, help="Init std for z (match training by default)")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--out_csv", type=str, default="network1_test_latent_opt.csv")
-    parser.add_argument(
-        "--use_clamped_loss",
-        action="store_true",
-        help="If set, evaluate and fit using the same clamped loss as training.",
-    )
-    args = parser.parse_args()
-
     cfg = Network1Config()
-    rng = np.random.default_rng(int(args.seed))
-
+    
     device = torch.device(cfg.device if (cfg.device == "cuda" and torch.cuda.is_available()) else "cpu")
     print(f"[eval] Device: {device}")
+
+    ckpt_path = Path(cfg.eval_ckpt_path)
+    if not ckpt_path.is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+
+    rng = np.random.default_rng(int(cfg.eval_seed))
 
     # Read split table to get test geometry IDs
     geom_table = pd.read_parquet(cfg.geom_table_path)
@@ -154,7 +221,7 @@ def main():
     #    sdf_scale=sdf_scale,
     #)
 
-    if args.use_clamped_loss:
+    if cfg.eval_loss_mode == "clamped":
         delta = float(getattr(cfg, "truncation_delta", 0.05))
         #delta = delta / max(sdf_scale, 1e-12)
         print(f"[eval] Using clamped loss: delta={delta}")
@@ -163,21 +230,16 @@ def main():
         print("[eval] Using unclamped L1 loss (not directly comparable to training clamped loss).")
 
     # Build a model with dummy embedding size; we will optimize z explicitly at test time
-    model = Network1SDF(
-        num_geometries=1,  # dummy
-        latent_dim=cfg.latent_dim,
-        hidden_dim=cfg.hidden_dim,
-        depth=cfg.depth,
-        latent_init_std=float(getattr(cfg, "latent_init_std", 0.012)),
-        activation=getattr(cfg, "activation", "relu"),
-        use_skip=bool(getattr(cfg, "use_skip", True)),
-        skip_layer=getattr(cfg, "skip_layer", None),
-    ).to(device)
-
-    load_decoder_only(model, Path(args.ckpt))
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    model, latent_dim_ckpt, _ = build_model_from_ckpt(ckpt, device=device)
+    load_decoder_only(model, ckpt_path)
 
     results = []
     sdf_dir = Path(cfg.sdf_dir)
+
+    fit_frac = float(cfg.eval_fit_frac)
+    if not (0.0 < fit_frac < 1.0):
+        raise ValueError(f"cfg.eval_fit_frac must be in (0,1). Got: {fit_frac}")
 
     for gid in test_gids:
         npz_path = sdf_dir / f"tool_geom{gid}_sdf.npz"
@@ -194,7 +256,7 @@ def main():
         # Split into fit/eval subsets
         N = xyz.shape[0]
         perm = rng.permutation(N)
-        n_fit = int(np.round(float(args.fit_frac) * N))
+        n_fit = int(np.round(fit_frac * N))
         n_fit = max(1, min(n_fit, N - 1))
         fit_idx = perm[:n_fit]
         eval_idx = perm[n_fit:]
@@ -209,10 +271,10 @@ def main():
             model=model,
             xyz_fit=xyz_fit,
             sdf_fit=sdf_fit,
-            latent_dim=cfg.latent_dim,
-            latent_init_std=float(args.latent_init_std),
-            latent_lr=float(args.latent_lr),
-            latent_steps=int(args.latent_steps),
+            latent_dim=latent_dim_ckpt,
+            latent_init_std=float(cfg.eval_latent_init_std),
+            latent_lr=float(cfg.eval_latent_lr),
+            latent_steps=int(cfg.eval_latent_steps),
             latent_l2_weight=float(cfg.latent_l2_weight),
             delta=delta,
             device=device,
@@ -234,7 +296,7 @@ def main():
         print(f"[eval] gid={gid} fit_l1={fit_l1:.6f} eval_l1={eval_l1:.6f}")
 
     df = pd.DataFrame(results).sort_values("geometry_id").reset_index(drop=True)
-    out_path = Path(args.out_csv)
+    out_path = Path(cfg.eval_out_csv)
     df.to_csv(out_path, index=False)
 
     print(f"[eval] Saved results to {out_path}")

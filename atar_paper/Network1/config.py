@@ -72,7 +72,7 @@ class Network1Config:
 
     # Sampling/batching
     batch_size: int = 2048
-    num_workers: int = 0
+    num_workers: int = 8
     shuffle: bool = True
     
     use_balanced_batches: bool = True
@@ -105,11 +105,29 @@ class Network1Config:
     device: str = "cuda"
 
     # Checkpoints
-    ckpt_dir: str = "./checkpoints_network1"
+    ckpt_dir: str = "atar_paper/checkpoints_network1"
     save_every: int = 5
 
     val_frac: float = 0.1
     
+    # ----------------------------
+    # Evaluation (Network-1)
+    # ----------------------------
+    eval_ckpt_path: str = "atar_paper/checkpoints_network1/best.ckpt"
+    eval_fit_frac: float = 0.5
+
+    # latent optimization (per held-out geometry)
+    eval_latent_steps: int = 800
+    eval_latent_lr: float = 1e-2
+    eval_latent_init_std: float = 0.012
+    eval_seed: int = 0
+
+    # reporting
+    eval_out_csv: str = "atar_paper/network1_test_latent_opt.csv"
+
+    # loss used for fitting z and reporting
+    # "clamped" matches training-style truncation; "l1" is unclamped abs error
+    eval_loss_mode: Literal["clamped", "l1"] = "clamped"
     
     
     
