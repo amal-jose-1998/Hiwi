@@ -34,21 +34,22 @@ def main():
     lit_model = Network1LitModule(cfg=cfg, num_train_geoms=n_train_geoms, stats=stats)
 
     early_cb = EarlyStopping(
-        monitor="val/loss",
-        mode="min",
-        patience=10,      
-        min_delta=0.0,
+        monitor="val/loss", # Watch the metric called "val/loss"
+        mode="min",         # Lower is better
+        patience=10,        # If it doesn’t improve for 10 validation checks, stop training.
+        min_delta=1e-4,
     )
 
     ckpt_cb = ModelCheckpoint(
         dirpath=cfg.ckpt_dir,
         monitor="val/loss",
         filename="network1-{epoch:03d}",
-        save_top_k=3,              
+        save_top_k=3,     # Keep the best 3 models (according to val/loss)         
         every_n_epochs=cfg.save_every,
         save_last=True,
     )
 
+    # Create the Trainer
     trainer = pl.Trainer(
         max_epochs=cfg.epochs,
         accelerator="gpu" if (cfg.device == "cuda" and torch.cuda.is_available()) else "cpu",
@@ -57,7 +58,7 @@ def main():
         log_every_n_steps=1
     )
 
-    trainer.fit(lit_model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    trainer.fit(lit_model, train_dataloaders=train_loader, val_dataloaders=val_loader) # Start training
     
     print("[train_network1] Done.")
 

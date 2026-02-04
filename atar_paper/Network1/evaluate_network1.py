@@ -1,5 +1,5 @@
 """
-Network-1 evaluation (component-aware, config-first).
+Network-1 evaluation 
 
 This script evaluates held-out geometries for an auto-decoder SDF model using
 the standard latent-optimization protocol (DeepSDF-style):
@@ -10,15 +10,9 @@ For each TEST geometry and each tool component:
   3) freeze decoder
   4) optimize a fresh latent vector z_{gid,comp} on a subset of points
   5) report fit / eval error (clamped L1 or unclamped L1 based on cfg.eval_loss_mode)
-
-Config-first:
-- Defaults come from Network1Config.
-- CLI flags (if provided) override config values.
 """
 
-import argparse
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import torch
@@ -27,13 +21,13 @@ from .config import Network1Config
 from .model import Network1SDF
 
 
-def _pick_device(cfg_device: str) -> torch.device:
+def _pick_device(cfg_device):
     if cfg_device == "cuda" and torch.cuda.is_available():
         return torch.device("cuda")
     return torch.device("cpu")
 
 
-def load_decoder_only(model: torch.nn.Module, ckpt_path: Path) -> None:
+def load_decoder_only(model, ckpt_path) -> None:
     """
     Load only the decoder weights (fcs + out) from either:
       - Lightning .ckpt  (expects key: "state_dict" with "model.fcs.*" and "model.out.*")
@@ -42,6 +36,7 @@ def load_decoder_only(model: torch.nn.Module, ckpt_path: Path) -> None:
 
     Latent embedding weights are intentionally ignored at eval time.
     """
+    # Loading the trained weights (excluding latents)
     ckpt = torch.load(ckpt_path, map_location="cpu")
 
     if isinstance(ckpt, dict) and "state_dict" in ckpt:
@@ -75,18 +70,18 @@ def load_decoder_only(model: torch.nn.Module, ckpt_path: Path) -> None:
 
 
 @torch.no_grad()
-def l1_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+def l1_loss(pred, target):
     return torch.mean(torch.abs(pred - target))
 
 
 @torch.no_grad()
-def clamped_l1_loss(pred: torch.Tensor, target: torch.Tensor, delta: float) -> torch.Tensor:
+def clamped_l1_loss(pred, target, delta):
     pred_c = torch.clamp(pred, -delta, delta)
     tgt_c = torch.clamp(target, -delta, delta)
     return torch.mean(torch.abs(pred_c - tgt_c))
 
 
-def _loss_fn(pred: torch.Tensor, target: torch.Tensor, loss_mode: str, delta: float) -> torch.Tensor:
+def _loss_fn(pred, target, loss_mode, delta):
     if loss_mode == "clamped":
         return clamped_l1_loss(pred, target, delta=delta)
     if loss_mode == "l1":
@@ -95,73 +90,53 @@ def _loss_fn(pred: torch.Tensor, target: torch.Tensor, loss_mode: str, delta: fl
 
 
 @torch.no_grad()
-def eval_error(model: Network1SDF, z: torch.Tensor, xyz: torch.Tensor, sdf: torch.Tensor, loss_mode: str, delta: float) -> float:
+def eval_error(model, z, xyz, sdf, loss_mode, delta):
+    # evaluates the decoder on a set of points, using a specific latent z.
     pred = model.forward_with_latent(z, xyz)
     return float(_loss_fn(pred, sdf, loss_mode=loss_mode, delta=delta).item())
 
 
-def optimize_latent(
-    model: Network1SDF,
-    xyz_fit: torch.Tensor,
-    sdf_fit: torch.Tensor,
-    latent_dim: int,
-    latent_init_std: float,
-    latent_lr: float,
-    latent_steps: int,
-    latent_l2_weight: float,
-    loss_mode: str,
-    delta: float,
-    device: torch.device,
-) -> torch.Tensor:
+def optimize_latent(model, xyz_fit, sdf_fit, latent_dim, latent_init_std, latent_lr,
+    latent_steps, latent_l2_weight, loss_mode, delta, device):
     """
     Optimize a fresh latent vector z for a single (geometry, component).
     Decoder weights are frozen; only z is updated.
     """
+    # Initialize a fresh latent z
     z = torch.randn(latent_dim, device=device) * float(latent_init_std)
     z = torch.nn.Parameter(z)
 
-    opt = torch.optim.Adam([z], lr=float(latent_lr))
+    opt = torch.optim.Adam([z], lr=float(latent_lr)) # Optimizer that updates only z
 
+    # Freeze the decoder, so that gradients flow through the decoder into z, but decoder weights don’t change.
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
 
+    # Iterative optimization loop
     for _ in range(int(latent_steps)):
         pred = model.forward_with_latent(z, xyz_fit)
-        recon = _loss_fn(pred, sdf_fit, loss_mode=loss_mode, delta=delta)
-        reg = torch.mean(z ** 2)
+        recon = _loss_fn(pred, sdf_fit, loss_mode=loss_mode, delta=delta) # match the SDF samples
+        reg = torch.mean(z ** 2) # keep the latent from blowing up
         loss = recon + float(latent_l2_weight) * reg
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
 
-    return z.detach()
+    return z.detach() # the optimized latent vector for that test geometry/component.
 
 
-def main() -> None:
+def main():
     cfg = Network1Config()
-
-    parser = argparse.ArgumentParser()
-    # Optional overrides (config-first)
-    parser.add_argument("--ckpt", type=str, default=None, help="Override cfg.eval_ckpt_path")
-    parser.add_argument("--fit_frac", type=float, default=None, help="Override cfg.eval_fit_frac")
-    parser.add_argument("--latent_steps", type=int, default=None, help="Override cfg.eval_latent_steps")
-    parser.add_argument("--latent_lr", type=float, default=None, help="Override cfg.eval_latent_lr")
-    parser.add_argument("--latent_init_std", type=float, default=None, help="Override cfg.eval_latent_init_std")
-    parser.add_argument("--seed", type=int, default=None, help="Override cfg.eval_seed")
-    parser.add_argument("--out_csv", type=str, default=None, help="Override cfg.eval_out_csv")
-    parser.add_argument("--loss_mode", type=str, default=None, choices=["clamped", "l1"], help="Override cfg.eval_loss_mode")
-    args = parser.parse_args()
-
-    ckpt_path = Path(args.ckpt) if args.ckpt is not None else Path(cfg.eval_ckpt_path)
-    fit_frac = float(args.fit_frac) if args.fit_frac is not None else float(cfg.eval_fit_frac)
-    latent_steps = int(args.latent_steps) if args.latent_steps is not None else int(cfg.eval_latent_steps)
-    latent_lr = float(args.latent_lr) if args.latent_lr is not None else float(cfg.eval_latent_lr)
-    latent_init_std = float(args.latent_init_std) if args.latent_init_std is not None else float(cfg.eval_latent_init_std)
-    seed = int(args.seed) if args.seed is not None else int(cfg.eval_seed)
-    out_csv = Path(args.out_csv) if args.out_csv is not None else Path(cfg.eval_out_csv)
-    loss_mode = str(args.loss_mode) if args.loss_mode is not None else str(cfg.eval_loss_mode)
+    ckpt_path = Path(cfg.eval_ckpt_path)
+    fit_frac = float(cfg.eval_fit_frac)
+    latent_steps = int(cfg.eval_latent_steps)
+    latent_lr = float(cfg.eval_latent_lr)
+    latent_init_std = float(cfg.eval_latent_init_std)
+    seed = int(cfg.eval_seed)
+    out_csv = Path(cfg.eval_out_csv)
+    loss_mode = str(cfg.eval_loss_mode)
 
     device = _pick_device(str(cfg.device))
     print(f"[eval] Device: {device}")
@@ -180,9 +155,10 @@ def main() -> None:
 
     rng = np.random.default_rng(seed)
 
-    # Read split table to get test geometry IDs
+    # Read test geometry IDs from the metadata table
     geom_table = pd.read_parquet(cfg.geom_table_path)
     test_gids = geom_table.loc[geom_table["split"] == "test", "geometry_id"].astype(int).tolist()
+
     if len(test_gids) == 0:
         raise RuntimeError("No test geometries found in geom_table split.")
     print(f"[eval] #test_geometries={len(test_gids)} -> {test_gids}")
@@ -190,7 +166,7 @@ def main() -> None:
     # Build a model shell; latents are optimized explicitly at test time.
     # Only fcs/out are needed; latent embedding is ignored.
     model = Network1SDF(
-        num_geometries=1,
+        num_geometries=1, # at eval time we are not using the embedding table at all.
         num_components=len(tool_components),
         latent_dim=cfg.latent_dim,
         hidden_dim=cfg.hidden_dim,
@@ -201,11 +177,12 @@ def main() -> None:
         skip_layer=cfg.skip_layer,
     ).to(device)
 
-    load_decoder_only(model, ckpt_path)
+    load_decoder_only(model, ckpt_path) # Load trained non-latent weights
 
     sdf_dir = Path(cfg.sdf_dir)
 
     results = []
+    # For each test geometry and each component
     for gid in test_gids:
         for comp in tool_components:
             npz_path = sdf_dir / f"tool_geom{gid}_{comp}_sdf.npz"
@@ -217,18 +194,20 @@ def main() -> None:
             sdf = data["sdf"].astype(np.float32)[:, None]
 
             N = xyz.shape[0]
+            # Randomly split points into “fit” and “eval”
             perm = rng.permutation(N)
-
             n_fit = int(np.round(fit_frac * N))
             n_fit = max(1, min(n_fit, N - 1))
             fit_idx = perm[:n_fit]
             eval_idx = perm[n_fit:]
 
-            xyz_fit = torch.from_numpy(xyz[fit_idx]).to(device)
+            xyz_fit = torch.from_numpy(xyz[fit_idx]).to(device) # used to optimize latent z
             sdf_fit = torch.from_numpy(sdf[fit_idx]).to(device)
-            xyz_eval = torch.from_numpy(xyz[eval_idx]).to(device)
+
+            xyz_eval = torch.from_numpy(xyz[eval_idx]).to(device) # never seen during optimization; used to test generalization within that geometry
             sdf_eval = torch.from_numpy(sdf[eval_idx]).to(device)
 
+            # Optimize latent on fit points
             z = optimize_latent(
                 model,
                 xyz_fit,
@@ -243,13 +222,14 @@ def main() -> None:
                 device=device,
             )
 
-            fit_err = eval_error(model, z, xyz_fit, sdf_fit, loss_mode=loss_mode, delta=delta)
-            eval_err = eval_error(model, z, xyz_eval, sdf_eval, loss_mode=loss_mode, delta=delta)
+            # Measure fit and eval error
+            fit_err = eval_error(model, z, xyz_fit, sdf_fit, loss_mode=loss_mode, delta=delta) # should be low
+            eval_err = eval_error(model, z, xyz_eval, sdf_eval, loss_mode=loss_mode, delta=delta) # tells us how well the learned decoder represents that geometry/component beyond the specific fit subset
 
             results.append(
                 {
                     "geometry_id": int(gid),
-                    "component": str(comp),
+                    "component": comp,
                     "n_points": int(N),
                     "n_fit": int(n_fit),
                     "n_eval": int(N - n_fit),
