@@ -11,20 +11,20 @@ This script:
 The generated files are used as ground-truth training data
 for Network-1 (explicit SDF regression / DeepSDF-like).
 """
-import sys
-from pathlib import Path
-
-ROOT = Path("/home/RUS_CIP/st184634/implementation")  
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
 from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
 import trimesh
 from scipy.spatial import cKDTree
+import sys
+from pathlib import Path
+
+ROOT = Path("/home/RUS_CIP/st184634/software_projects")  
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from ddacs.utils import extract_mesh 
+
 from atar_paper.Network1.config import SDFGenerationConfig
 cfg = SDFGenerationConfig()
 
@@ -41,53 +41,26 @@ TOOL_COMPONENTS = cfg.tool_components
 # =============================================================================
 # Mesh construction
 # =============================================================================
-def build_tool_mesh(h5_path, timestep=FINAL_FORMING_TIMESTEP):
+def build_component_mesh(h5_path, comp, timestep=FINAL_FORMING_TIMESTEP):
     """
-    Extract and combine tool meshes from a DDACS simulation file.
-    The die, punch, and binder meshes are extracted at a fixed timestep
-    and merged into a single mesh suitable for signed distance queries.
-    Center and scale so that combined tool XY edge length = 1
-
-    Parameters
-    h5_path : Path
-        Path to the DDACS .h5 simulation file.
-    timestep : int
-        Simulation timestep at which tool geometry is extracted.
-
-    Returns
-    vertices : np.ndarray, shape (N, 3)
-        Combined vertex coordinates of all tool components.
-    faces : np.ndarray, shape (F, 3)
-        Combined triangle indices with corrected offsets.
-    meta : dict
-        Normalization metadata (tool_edge_length, center).
+    Extract ONE tool component mesh (die/punch/binder) from a DDACS .h5 file,
+    then center+scale so its XY edge length = 1 (component-wise normalisation).
     """
-    all_vertices = []
-    all_faces = []
-    offset = 0
+    v, f = extract_mesh(h5_path, comp, timestep=timestep)
 
-    for comp in TOOL_COMPONENTS:
-        v, f = extract_mesh(h5_path, comp, timestep=timestep)
-        all_vertices.append(v)
-        all_faces.append(f + offset)
-        offset += v.shape[0]
-    
-    vertices = np.vstack(all_vertices)
-    faces = np.vstack(all_faces)
+    # Center first
+    center = (v.min(axis=0) + v.max(axis=0)) / 2.0
+    v_centered = v - center
 
-    # Center first (so edge length is translation-invariant)
-    center = (vertices.min(axis=0) + vertices.max(axis=0)) / 2.0
-    v_centered = vertices - center
-
-    # Tool-combo "edge length" proxy: in-plane bbox max edge
+    # XY bbox edge length proxy
     xy = v_centered[:, :2]
     tool_edge = float(np.max(xy.max(axis=0) - xy.min(axis=0)))
     if tool_edge <= 0:
-        raise ValueError("Invalid tool_edge length proxy.")
+        raise ValueError(f"Invalid tool_edge for comp={comp} in {h5_path}")
 
-    vertices_scaled = v_centered / tool_edge
+    v_scaled = v_centered / tool_edge
 
-    return vertices_scaled, faces, {
+    return v_scaled, f, {
         "tool_edge": tool_edge,
         "center": center.astype(np.float32),
     }
@@ -190,28 +163,33 @@ def main():
 
     print("Generating SDF samples for each geometry variant...\n")
 
-    for _, row in tqdm(
-                    geom_table.iterrows(),
-                    total=len(geom_table),
-                    desc="Generating SDF per geometry",
-                ):
+    for _, row in tqdm(geom_table.iterrows(), total=len(geom_table), desc="Generating SDF per geometry/component"):
         geom_id = int(row["geometry_id"])
         rep_id = int(row["rep_ID"])  # representative simulation ID
 
         h5_path = DDACS_ROOT / "h5" / f"{rep_id}.h5"
         print(f"Geometry {geom_id}: using rep_ID={rep_id}, h5={h5_path}")
 
-        vertices, faces, meta = build_tool_mesh(h5_path)
+        for comp in TOOL_COMPONENTS:
+            vertices, faces, meta = build_component_mesh(h5_path, comp)
 
-        print(f"  Mesh: {vertices.shape[0]} vertices, {faces.shape[0]} faces")
+            print(f"  [{comp}] Mesh: {vertices.shape[0]} vertices, {faces.shape[0]} faces")
 
-        rng = np.random.default_rng(cfg.seed + geom_id)
+            rng = np.random.default_rng(cfg.seed + geom_id * 100 + (abs(hash(comp)) % 97))
 
-        points, sdf = sample_sdf_for_mesh(vertices, faces, rng=rng)
+            points, sdf = sample_sdf_for_mesh(vertices, faces, rng=rng)
 
-        out_path = SDF_OUT_DIR / f"tool_geom{geom_id}_sdf.npz" # training data for Network 1
-        np.savez(out_path, points=points, sdf=sdf, geom_id=geom_id, tool_edge=meta["tool_edge"], center=meta["center"])
-        print(f"  Saved SDF samples to {out_path} (N={points.shape[0]})\n")
+            out_path = SDF_OUT_DIR / f"tool_geom{geom_id}_{comp}_sdf.npz"
+            np.savez(
+                out_path,
+                points=points,
+                sdf=sdf,
+                geom_id=geom_id,
+                comp=comp,
+                tool_edge=meta["tool_edge"],
+                center=meta["center"],
+            )
+            print(f"  [{comp}] Saved SDF samples to {out_path} (N={points.shape[0]})\n")
 
     print("Done.")
 

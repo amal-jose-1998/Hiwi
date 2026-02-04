@@ -70,13 +70,16 @@ class Network1Config:
     stats_path: str = "/home/RUS_CIP/st184634/software_projects/atar_paper/network1_stats.npz"
     geom_table_path: str = "/home/RUS_CIP/st184634/software_projects/atar_paper/prepared_metadata/geom_table.parquet"
 
+    tool_components: Tuple[str, ...] = ("die", "punch", "binder")
+    use_component_onehot: bool = True 
+
     # Sampling/batching
     batch_size: int = 2048
     num_workers: int = 8
     shuffle: bool = True
     
     use_balanced_batches: bool = True
-    geoms_per_batch: int = 5
+    geoms_per_batch: int = 5 # number of (geom,comp) pairs per batch
     samples_per_geom_in_batch: int = 256
 
     # Model
@@ -113,7 +116,7 @@ class Network1Config:
     # ----------------------------
     # Evaluation (Network-1)
     # ----------------------------
-    eval_ckpt_path: str = "atar_paper/checkpoints_network1/best.ckpt"
+    eval_ckpt_path: str = "atar_paper/checkpoints_network1/last.ckpt"
     eval_fit_frac: float = 0.5
 
     # latent optimization (per held-out geometry)

@@ -19,7 +19,7 @@ This script builds two parquet files:
 import sys
 from pathlib import Path
 
-ROOT = Path("/home/RUS_CIP/st184634/implementation")  
+ROOT = Path("/home/RUS_CIP/st184634/software_projects")  
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
